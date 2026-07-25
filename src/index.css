@@ -264,6 +264,70 @@ input,
   animation: fade-in 0.15s ease-out;
 }
 
+/* Brief highlight on a heading scrolled to via a note-link's anchor, so the jump has somewhere
+   obvious to land the eye instead of just silently repositioning the scroll. */
+@keyframes note-link-highlight-flash {
+  from { background-color: rgb(var(--accent-rgb) / 0.25); }
+  to { background-color: transparent; }
+}
+
+.note-link-highlight-flash {
+  animation: note-link-highlight-flash 1.4s ease-out;
+  border-radius: 4px;
+}
+
+/* The live `[[query` span while the note-link autocomplete trigger is active - see
+   noteLinkTrigger.ts's decorations prop. */
+.note-link-trigger-pending {
+  background-color: rgb(var(--accent-rgb) / 0.15);
+  border-radius: 3px;
+}
+
+/* The `notePin` atom node's glyph (see notePin.ts/notePinView.ts) - a small clickable inline
+   marker planted by the selection toolbar's "Copy link to this point". note-link-highlight-flash
+   (above) is reused on it verbatim for the same "briefly draw the eye here" navigation flash. */
+.note-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.15em;
+  border-radius: 3px;
+  color: rgb(var(--accent-rgb));
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s, background-color 0.15s;
+}
+
+.note-pin:hover {
+  opacity: 1;
+  background-color: rgb(var(--accent-rgb) / 0.15);
+}
+
+/* The `noteLinkChip` atom node's glyph (see noteLinkChip.ts/noteLinkChipView.ts) - a small
+   Cmd/Ctrl-clickable inline marker standing in for a `link` mark when a pasted note:// link had
+   no selected text to attach one to. Same sizing as .note-pin above, deliberately reusing it so
+   the two glyphs sit consistently inline with text - the icon itself is what tells them apart. */
+.note-link-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.15em;
+  border-radius: 3px;
+  color: rgb(var(--accent-rgb));
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s, background-color 0.15s;
+}
+
+.note-link-chip:hover {
+  opacity: 1;
+  background-color: rgb(var(--accent-rgb) / 0.15);
+}
+
 .prose-note {
   color: var(--text-primary);
   font-size: 15px;
@@ -453,6 +517,11 @@ input,
   min-width: 260px;
   max-width: 100%;
   min-height: 140px;
+  /* Caps how far the resize handle can stretch this - without it, a single drag
+     (even an accidental one) can balloon the block to swallow the rest of the
+     note with no obvious cause. Past this, the expand button (see
+     codeBlockGrips.ts) is the intended way to get more room. */
+  max-height: 800px;
   /* ~350px of visible code under the ~34px tools bar. */
   height: 384px;
 }
@@ -588,13 +657,14 @@ input,
 .prose-note .milkdown-code-block .cm-scroller {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
-/* Floating remove button (see milkdown/codeBlockGrips.ts) - overlaid in the
-   tools bar's Copy button slot rather than an actual child of it, since that
-   bar belongs to the vendored code-block component's own Vue tree. Colors
-   match the code block's own fixed VSCode-dark chrome (like `.copy-button`
-   did) rather than the app's light/midnight `--danger` tokens, since it
-   sits on that dark bar regardless of the app's theme. */
-.code-block-delete-btn {
+/* Floating tool buttons (remove, expand, copy, zoom, search - see
+   milkdown/codeBlockGrips.ts) - overlaid in the tools bar's Copy button slot
+   rather than actual children of it, since that bar belongs to the vendored
+   code-block component's own Vue tree. Colors match the code block's own
+   fixed VSCode-dark chrome (like `.copy-button` did) rather than the app's
+   light/midnight tokens, since they sit on that dark bar regardless of the
+   app's theme. */
+.code-block-tool-btn {
   position: absolute;
   z-index: 5;
   display: flex;
@@ -604,15 +674,168 @@ input,
   height: 22px;
   border-radius: 6px;
   color: #9da5b4;
-  font-size: 1.15em;
-  line-height: 1;
   cursor: pointer;
   pointer-events: auto;
   transition: color 0.1s ease, background-color 0.1s ease;
 }
+.code-block-tool-btn:hover {
+  color: #d7dae0;
+  background: rgba(255, 255, 255, 0.1);
+}
+.code-block-delete-btn {
+  font-size: 1.15em;
+  line-height: 1;
+}
 .code-block-delete-btn:hover {
   color: #f87171;
   background: rgba(248, 113, 113, 0.15);
+}
+.code-block-copy-btn.copied {
+  color: #4ade80;
+}
+.code-block-copy-btn.copied:hover {
+  background: rgba(74, 222, 128, 0.15);
+}
+/* While a code block is expanded (see .cb-expanded below), codeBlockGrips.ts
+   switches the expand button to `position: fixed` and repurposes it as the
+   "collapse" control - the copy/zoom/search buttons follow it to `fixed`
+   too, staying usable in fullscreen. Only the delete button is hidden
+   entirely: deleting mid-expand isn't a case worth supporting. */
+/* Expanded ("fullscreen") code block: escapes the note's flow to cover the
+   whole editor pane - toolbar included, not just the note content below it
+   (see Editor.tsx's `data-note-editor-root`) - so a note author gets a full-
+   size area to write code in. Coordinates come from codeBlockGrips.ts via
+   custom properties rather than being computed here, since they depend on
+   that pane's live layout (sidebar width, toolbar visibility, window size).
+   `!important` guards against the resize handle's own inline width/height -
+   native `resize: both` (see .milkdown-code-block above) writes those
+   directly onto the element, which would otherwise win over this class. */
+.prose-note .milkdown-code-block.cb-expanded {
+  position: fixed !important;
+  top: var(--cb-rect-top) !important;
+  left: var(--cb-rect-left) !important;
+  width: var(--cb-rect-width) !important;
+  height: var(--cb-rect-height) !important;
+  max-width: none !important;
+  /* Overrides the 800px resize cap above - expanded mode fills the whole
+     editor pane regardless of that clamp. */
+  max-height: none !important;
+  margin: 0 !important;
+  z-index: 30;
+  resize: none;
+  border-radius: 0;
+}
+/* @codemirror/search only ever mounts an empty placeholder panel here (see
+   codeBlock.ts's `createPanel`) - the real find/replace UI is the draggable
+   popup below, not @codemirror/search's own bar-across-the-top default. This
+   still collapses it to nothing rather than trusting the empty div to stay
+   invisible on its own, since `.cm-panels` itself carries oneDark's
+   background/border-bottom (see theme-one-dark) regardless of what's inside. */
+.prose-note .milkdown-code-block .cm-panels {
+  display: none;
+}
+/* Draggable find/replace popup (see codeBlockGrips.ts's SearchPopup) - one
+   per code block, floated the same `position: fixed` way as the tool
+   buttons above (see toFixedRect's doc comment there for why fixed rather
+   than absolute: both `.milkdown-code-block` and `.codemirror-host` clip
+   overflow, which would otherwise cut off a popup dragged near a block's
+   edge). Deliberately just two rows (find, replace) and no case/regexp/
+   whole-word toggles - those read as power-user chrome for what's meant to
+   be a quick in-block search, not a full editor's find UI. */
+.code-block-search-popup {
+  position: fixed;
+  z-index: 32;
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  background: #282c34;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  font-size: 0.8em;
+  color: #d7dae0;
+}
+.code-block-search-popup .search-popup-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #6b7280;
+  cursor: move;
+  touch-action: none;
+}
+.code-block-search-popup .search-popup-close {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9da5b4;
+  cursor: pointer;
+  line-height: 1;
+  border-radius: 4px;
+}
+.code-block-search-popup .search-popup-close:hover {
+  color: #d7dae0;
+  background: rgba(255, 255, 255, 0.1);
+}
+.code-block-search-popup .search-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.35em 0.5em;
+}
+.code-block-search-popup .search-popup-row + .search-popup-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.code-block-search-popup input {
+  flex: 1;
+  min-width: 0;
+  background: #21252b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: #d7dae0;
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0.25em 0.5em;
+  outline: none;
+}
+.code-block-search-popup input:focus {
+  border-color: rgb(var(--accent-rgb) / 0.6);
+}
+.code-block-search-popup button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #9da5b4;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.code-block-search-popup button:hover {
+  color: #d7dae0;
+  background: rgba(255, 255, 255, 0.1);
+}
+.code-block-search-popup .search-popup-nav-btn {
+  width: 20px;
+  height: 20px;
+}
+.code-block-search-popup .search-popup-text-btn {
+  padding: 0.2em 0.5em;
+  font-size: 0.95em;
+  white-space: nowrap;
+}
+.code-block-search-popup .search-popup-count {
+  flex-shrink: 0;
+  color: #6b7280;
+  font-size: 0.85em;
+  white-space: nowrap;
+  padding-left: 0.2em;
 }
 .prose-note blockquote {
   border-left: 3px solid rgb(var(--accent-rgb) / 0.5);

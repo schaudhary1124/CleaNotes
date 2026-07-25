@@ -43,6 +43,7 @@ import {
   type MergeTabPayload,
 } from "./utils/windowInstance";
 import { broadcastNoteSaved, listenForNoteSaved } from "./utils/noteSync";
+import type { NoteLinkTarget } from "./milkdown/noteLinkHref";
 import { loadMainTabSession, saveMainTabSession } from "./utils/tabSession";
 import {
   addNoteToIndex,
@@ -52,6 +53,14 @@ import {
   syncSearchIndex,
   updateNoteInIndex,
 } from "./utils/searchIndex";
+import {
+  addNoteToBacklinksIndex,
+  loadPersistedBacklinksIndex,
+  movePathInBacklinksIndex,
+  removePathFromBacklinksIndex,
+  syncBacklinksIndex,
+  updateNoteInBacklinksIndex,
+} from "./utils/backlinksIndex";
 import type { AppMode, AppSettings, BrowseFilter, TreeEntry } from "./types";
 
 type BootStatus = "loading" | "ready" | "error";
@@ -115,6 +124,10 @@ function App() {
   const [activeContent, setActiveContent] = useState("");
   const [tabModes, setTabModes] = useState<Record<string, AppMode>>({});
   const [sketchMode, setSketchMode] = useState(false);
+  // Set by handleNavigateToNoteLink right before opening an anchored link's target note
+  // (a heading or a notePin - see NoteLinkTarget), consumed by the Editor mount that opens it
+  // (see scrollToAnchorId below), then cleared.
+  const [pendingScrollAnchor, setPendingScrollAnchor] = useState<{ path: string; anchorId: string } | null>(null);
   const [view, setView] = useState<"home" | "note">("home");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [browseFilter, setBrowseFilter] = useState<BrowseFilter>("all");
@@ -130,6 +143,9 @@ function App() {
 
   const toolbarVisible = !settings.toolbarCollapsed;
   const handleToggleToolbar = () => setSettings((s) => ({ ...s, toolbarCollapsed: !s.toolbarCollapsed }));
+
+  const sidebarCollapsed = settings.sidebarCollapsed;
+  const handleToggleSidebarCollapse = () => setSettings((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }));
 
   const activeContentRef = useRef(activeContent);
   const activeNotePathRef = useRef(activeNotePath);
@@ -196,6 +212,7 @@ function App() {
       await writeNote(path, content);
       savedContentRef.current = content;
       updateNoteInIndex(path, content);
+      updateNoteInBacklinksIndex(path, content);
       await broadcastNoteSaved(path, content);
     } catch {
       // The active note may have been deleted or moved outside the app;
@@ -238,6 +255,42 @@ function App() {
       if (isNewTab) setTabMode(path, "edit");
     },
     [selectNote, setTabMode],
+  );
+
+  /** Cmd/Ctrl-clicking a note:// link (or, later, choosing a result from the `[[` picker) routes
+   * here. Scrolls in place for a self-link (a note linking to its own heading or notePin) rather
+   * than flushing/rereading/remounting the note that's already open, and shows a toast instead of
+   * leaving a dead tab behind when the target note no longer exists (renamed/deleted since the
+   * link was created - see backlinksIndex.ts's documented limitation on stale link targets).
+   * A heading and a notePin (see notePinView.ts) both resolve the exact same way - a real DOM id
+   * on the target element - so both funnel through one `anchorId` here rather than needing
+   * separate heading/pin-shaped handling. */
+  const handleNavigateToNoteLink = useCallback(
+    async (target: NoteLinkTarget) => {
+      const { path } = target;
+      const anchorId = target.headingId ?? (target.pinId ? `note-pin-${target.pinId}` : undefined);
+      if (path === activeNotePathRef.current) {
+        if (!anchorId) return;
+        const el = document.getElementById(anchorId);
+        if (!el) {
+          showToast(target.pinId ? "Couldn't find that point" : "Couldn't find that heading");
+          return;
+        }
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("note-link-highlight-flash");
+        setTimeout(() => el.classList.remove("note-link-highlight-flash"), 1600);
+        return;
+      }
+      if (anchorId) setPendingScrollAnchor({ path, anchorId });
+      try {
+        await handleOpenNote(path);
+      } catch {
+        setPendingScrollAnchor(null);
+        setTabs((current) => current.filter((p) => p !== path));
+        showToast("That note no longer exists");
+      }
+    },
+    [handleOpenNote],
   );
 
   const handleSelectTab = useCallback(
@@ -384,6 +437,8 @@ function App() {
             await loadPersistedSearchIndex();
             await syncSearchIndex(initialTree);
             setSearchIndexReady(true);
+            await loadPersistedBacklinksIndex();
+            await syncBacklinksIndex(initialTree);
             await refreshTrash();
           })();
           return;
@@ -418,6 +473,8 @@ function App() {
           await loadPersistedSearchIndex();
           await syncSearchIndex(initialTree);
           setSearchIndexReady(true);
+          await loadPersistedBacklinksIndex();
+          await syncBacklinksIndex(initialTree);
           // Only the main window sweeps expired trash, so two windows never race the same
           // purge - every cold launch creates exactly one main-labeled window (see
           // tauri.conf.json), so this still runs once per launch without extra machinery.
@@ -449,6 +506,7 @@ function App() {
     (async () => {
       const fn = await listenForNoteSaved((path, content) => {
         updateNoteInIndex(path, content);
+        updateNoteInBacklinksIndex(path, content);
         if (path !== activeNotePathRef.current) return;
         if (activeContentRef.current !== savedContentRef.current) return;
         // Already showing this exact content (e.g. the other window's save just
@@ -550,6 +608,7 @@ function App() {
       const note = await createNote(parentPath, title, content, template.look);
       await refreshTree();
       addNoteToIndex(note.path, content);
+      addNoteToBacklinksIndex(note.path, content);
       savedContentRef.current = content;
       setTabs((current) => insertTabNextToActive(current, activeNotePathRef.current, note.path));
       setActiveNotePath(note.path);
@@ -582,6 +641,7 @@ function App() {
         const newPath = await renameEntry(path, newTitle, isFolder);
         await refreshTree();
         movePathInIndex(path, newPath);
+        movePathInBacklinksIndex(path, newPath);
         setTabs((current) => current.map((p) => remapTabPath(p, path, newPath)));
         const current = activeNotePathRef.current;
         if (current) {
@@ -612,6 +672,7 @@ function App() {
         const newPath = await moveEntry(path, targetParentPath);
         await refreshTree();
         movePathInIndex(path, newPath);
+        movePathInBacklinksIndex(path, newPath);
         setTabs((current) => current.map((p) => remapTabPath(p, path, newPath)));
         const current = activeNotePathRef.current;
         if (current) {
@@ -632,6 +693,7 @@ function App() {
         if (isFolder) await deleteFolder(path);
         else await deleteNote(path);
         removePathFromIndex(path);
+        removePathFromBacklinksIndex(path);
       } catch (err) {
         showToast(err instanceof Error ? err.message : "Delete failed");
         return;
@@ -697,6 +759,7 @@ function App() {
         restoredNotes.map(async (n) => {
           const content = await readNote(n.path).catch(() => "");
           addNoteToIndex(n.path, content);
+          addNoteToBacklinksIndex(n.path, content);
         }),
       );
       if (restoredToRootTitles.length === 1) {
@@ -734,6 +797,9 @@ function App() {
     [tree, activeNotePath],
   );
 
+  // Every note in the vault, for the editor's "link to a note" picker - not just the active one.
+  const allNotes = useMemo(() => flattenNotes(tree), [tree]);
+
   /** New-note action for the tab strip's "+" button: creates a sibling of the active tab's
    * note, or falls back to the vault root if no note is open. */
   const handleNewNoteInActiveFolder = useCallback(() => {
@@ -763,6 +829,7 @@ function App() {
       } else if (e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSidebarOpen(true);
+        setSettings((s) => (s.sidebarCollapsed ? { ...s, sidebarCollapsed: false } : s));
         setTimeout(() => searchInputRef.current?.focus(), 0);
       }
     }
@@ -790,7 +857,10 @@ function App() {
           onCloseSettings={() => setSettingsOpen(false)}
           toolbarVisible={toolbarVisible}
           onToggleToolbar={handleToggleToolbar}
+          sidebarOpen={sidebarOpen}
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebarCollapse={handleToggleSidebarCollapse}
           tabStrip={
             tabNotes.length > 0 ? (
               <TabStrip
@@ -818,8 +888,10 @@ function App() {
               <Sidebar
                 tree={tree}
                 trash={trash}
+                activeNotePath={view === "note" ? activeNotePath : null}
                 open={sidebarOpen}
                 onClose={() => setSidebarOpen(false)}
+                collapsed={sidebarCollapsed}
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
                 searchIndexReady={searchIndexReady}
@@ -832,10 +904,15 @@ function App() {
                   handleOpenNote(path);
                 }}
                 onDuplicateNote={handleDuplicateNote}
+                onPromptNewNote={promptNewNote}
+                onPromptNewFolder={promptNewFolder}
                 onRename={handleRename}
                 onDeleteEntry={handleDeleteEntry}
+                onMove={handleMove}
                 onSetFolderColor={handleSetFolderColor}
                 onSetStarred={handleSetStarred}
+                onRestoreFromTrash={handleRestoreFromTrash}
+                onRequestDeleteForever={handleRequestDeleteForever}
               />
 
               <main className="glass-panel shadow-app relative flex-1 overflow-hidden">
@@ -886,11 +963,18 @@ function App() {
                       await writeNote(activeNote.path, content);
                       savedContentRef.current = content;
                       updateNoteInIndex(activeNote.path, content);
+                      updateNoteInBacklinksIndex(activeNote.path, content);
                       await broadcastNoteSaved(activeNote.path, content);
                     }}
                     toolbarVisible={toolbarVisible}
                     sketchMode={sketchMode}
                     onToggleSketchMode={() => setSketchMode((v) => !v)}
+                    noteChoices={allNotes}
+                    onNavigateToNoteLink={handleNavigateToNoteLink}
+                    scrollToAnchorId={
+                      pendingScrollAnchor?.path === activeNote.path ? pendingScrollAnchor.anchorId : undefined
+                    }
+                    onScrolledToAnchor={() => setPendingScrollAnchor(null)}
                   />
                 )}
 

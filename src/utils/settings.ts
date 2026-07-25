@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   accent: "indigo",
   background: "soft",
   toolbarCollapsed: false,
+  sidebarCollapsed: false,
 };
 
 export function loadSettings(): AppSettings {

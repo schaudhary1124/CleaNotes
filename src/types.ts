@@ -89,6 +89,7 @@ export interface AppSettings {
   accent: string;
   background: BackgroundStyle;
   toolbarCollapsed: boolean;
+  sidebarCollapsed: boolean;
 }
 
 export type SketchTool = "pen" | "highlighter" | "eraser";

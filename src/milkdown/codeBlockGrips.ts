@@ -3,6 +3,19 @@ import type { PluginView } from "@milkdown/kit/prose/state";
 import type { Node } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
+import {
+  closeSearchPanel,
+  findNext,
+  findPrevious,
+  getSearchQuery,
+  openSearchPanel,
+  replaceAll,
+  replaceNext,
+  SearchQuery,
+  setSearchQuery,
+} from "@codemirror/search";
+import { EditorView as CodeMirrorView } from "@codemirror/view";
+import { CODE_BLOCK_DEFAULT_FONT_SIZE } from "./codeBlock";
 
 /** Walks up from a position inside a code block's CodeMirror content to the
  * `code_block` node itself, the way tableGrips.ts's resolveRowInfo walks up
@@ -46,17 +59,372 @@ function deleteCodeBlock(view: EditorView, blockDom: HTMLElement) {
   view.focus();
 }
 
-/** Per-editor overlay: one delete button per code block, floated in place of
- * the tools bar's Copy button (hidden via CSS - see index.css). Lives in the
- * Milkdown mount div (a sibling of `editorView.dom`, not a child of it)
- * rather than actually replacing the Copy button in the DOM, because that
- * button belongs to the vendored `codeBlockComponent`'s own Vue tree, which
- * would just re-render over any node inserted into it directly - same
- * reasoning as TableOverlay in tableGrips.ts. */
+/** Finds the CodeMirror instance backing a code block's DOM, so the search
+ * and zoom controls below can drive it directly (`openSearchPanel`,
+ * `requestMeasure`) - this plugin only sees the ProseMirror side otherwise,
+ * since the CodeMirror editor is owned by @milkdown/components' node view. */
+function findCodeMirrorView(blockDom: HTMLElement): CodeMirrorView | null {
+  const content = blockDom.querySelector(".cm-content");
+  if (!content) return null;
+  return CodeMirrorView.findFromDOM(content as HTMLElement);
+}
+
+/** Zoom range (px) for the per-block `--cb-font-size` custom property (see
+ * codeBlock.ts's theme). Clamped rather than open-ended so a stray flurry of
+ * clicks can't shrink code to unreadable or blow it up past the block. */
+const MIN_FONT_SIZE = 10;
+const MAX_FONT_SIZE = 28;
+const FONT_STEP = 1;
+
+function currentFontSize(block: HTMLElement): number {
+  const raw = parseFloat(block.style.getPropertyValue("--cb-font-size"));
+  return Number.isFinite(raw) ? raw : CODE_BLOCK_DEFAULT_FONT_SIZE;
+}
+
+function zoomBy(block: HTMLElement, delta: number) {
+  const next = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, currentFontSize(block) + delta));
+  block.style.setProperty("--cb-font-size", `${next}px`);
+  // The font-size change comes from outside CodeMirror's own update cycle
+  // (a plain CSS custom property write), so its cached line-height/width
+  // measurements need an explicit nudge to recompute against the new size.
+  findCodeMirrorView(block)?.requestMeasure();
+}
+
+/** Lucide glyphs, inlined - this file draws its buttons as raw DOM (see
+ * CodeBlockGripsView below), not JSX, so there's no React tree to pull the
+ * lucide-react components into the way Editor.tsx's toolbar does. Kept
+ * visually identical (same paths/stroke) for consistency with the rest of
+ * the app's iconography. */
+const MAXIMIZE_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/></svg>';
+const MINIMIZE_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m14 10 7-7"/><path d="M20 10h-6V4"/><path d="m3 21 7-7"/><path d="M4 14h6v6"/></svg>';
+const SEARCH_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.34-4.34"/></svg>';
+const ZOOM_IN_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>';
+const ZOOM_OUT_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>';
+const COPY_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const CHECK_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+const CHEVRON_UP_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
+const CHEVRON_DOWN_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+const GRIP_ICON =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="9" r="1"/><circle cx="19" cy="9" r="1"/><circle cx="5" cy="9" r="1"/><circle cx="12" cy="15" r="1"/><circle cx="19" cy="15" r="1"/><circle cx="5" cy="15" r="1"/></svg>';
+
+/** How long the copy button shows its "copied" checkmark before reverting. */
+const COPIED_FEEDBACK_MS = 1200;
+/** Match count is only informational (see SearchPopup) - capped so a huge
+ * pasted file with a one-character query can't walk thousands of matches
+ * on every keystroke. */
+const MAX_COUNTED_MATCHES = 999;
+
+/** Builds the query SearchPopup drives @codemirror/search with - always
+ * plain-text and case-insensitive, matching the "simple find, not a power
+ * -user regex tool" brief (see .code-block-search-popup in index.css). */
+function buildSearchQuery(search: string, replace: string): SearchQuery {
+  return new SearchQuery({ search, replace, caseSensitive: false, literal: true, regexp: false, wholeWord: false });
+}
+
+function countMatches(cm: CodeMirrorView, query: SearchQuery): number {
+  if (!query.valid) return 0;
+  const cursor = query.getCursor(cm.state);
+  let count = 0;
+  while (count <= MAX_COUNTED_MATCHES && !cursor.next().done) count++;
+  return count;
+}
+
+/** A small draggable find/replace popup for one code block, backed by
+ * @codemirror/search's query/highlight/command machinery (see codeBlock.ts's
+ * `search({ createPanel })`) but with its own compact DOM instead of that
+ * package's default panel - see .code-block-search-popup in index.css for
+ * why. Owns its DOM element but not its placement in the document or its
+ * lifecycle map - CodeBlockGripsView appends/positions/removes it, the same
+ * split TableOverlay uses for its own floating pieces in tableGrips.ts. */
+class SearchPopup {
+  readonly dom: HTMLElement;
+  private findInput: HTMLInputElement;
+  private replaceInput: HTMLInputElement;
+  private countLabel: HTMLElement;
+  private dragHandle: HTMLElement;
+  // Once the user drags this popup, it stops following the code block's
+  // tools bar (see reposition) - a floating window that's been placed
+  // somewhere on purpose shouldn't jump back the next time the block
+  // resizes or the doc changes.
+  private pinnedPos: { top: number; left: number } | null = null;
+  private dragPointerId: number | null = null;
+  private dragStart = { x: 0, y: 0, top: 0, left: 0 };
+
+  constructor(
+    private block: HTMLElement,
+    onClose: () => void,
+  ) {
+    this.dom = document.createElement("div");
+    this.dom.className = "code-block-search-popup";
+    // Keeps clicks/drags inside the popup from landing on the code block
+    // underneath (which would move the text cursor) or bubbling up into
+    // ProseMirror's own mousedown handling.
+    this.dom.addEventListener("mousedown", (e) => e.stopPropagation());
+
+    this.dragHandle = document.createElement("div");
+    this.dragHandle.className = "search-popup-handle";
+    this.dragHandle.innerHTML = GRIP_ICON;
+    this.dragHandle.addEventListener("pointerdown", this.onDragStart);
+    this.dragHandle.addEventListener("pointermove", this.onDragMove);
+    this.dragHandle.addEventListener("pointerup", this.onDragEnd);
+    this.dragHandle.addEventListener("pointercancel", this.onDragEnd);
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "search-popup-close";
+    close.title = "Close";
+    close.setAttribute("aria-label", "Close find and replace");
+    close.textContent = "×";
+    close.addEventListener("click", onClose);
+    this.dragHandle.append(close);
+
+    this.findInput = document.createElement("input");
+    this.findInput.type = "text";
+    this.findInput.placeholder = "Find";
+    this.findInput.setAttribute("aria-label", "Find in code block");
+    this.findInput.spellcheck = false;
+
+    const prev = this.navButton(CHEVRON_UP_ICON, "Previous match", () => this.withCM(findPrevious));
+    const next = this.navButton(CHEVRON_DOWN_ICON, "Next match", () => this.withCM(findNext));
+
+    this.countLabel = document.createElement("span");
+    this.countLabel.className = "search-popup-count";
+
+    const findRow = document.createElement("div");
+    findRow.className = "search-popup-row";
+    findRow.append(this.findInput, prev, next, this.countLabel);
+
+    this.replaceInput = document.createElement("input");
+    this.replaceInput.type = "text";
+    this.replaceInput.placeholder = "Replace";
+    this.replaceInput.setAttribute("aria-label", "Replace with");
+    this.replaceInput.spellcheck = false;
+
+    const replaceBtn = this.textButton("Replace", () => this.withCM(replaceNext));
+    const replaceAllBtn = this.textButton("All", () => this.withCM(replaceAll));
+
+    const replaceRow = document.createElement("div");
+    replaceRow.className = "search-popup-row";
+    replaceRow.append(this.replaceInput, replaceBtn, replaceAllBtn);
+
+    this.dom.append(this.dragHandle, findRow, replaceRow);
+
+    this.findInput.addEventListener("input", () => this.commitQuery());
+    this.replaceInput.addEventListener("input", () => this.commitQuery());
+    this.findInput.addEventListener("keydown", (e) => this.onFindKeyDown(e, onClose));
+    this.replaceInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.withCM(replaceNext);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    });
+  }
+
+  private navButton(icon: string, label: string, onClick: () => void) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "search-popup-nav-btn";
+    btn.innerHTML = icon;
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  private textButton(text: string, onClick: () => void) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "search-popup-text-btn";
+    btn.textContent = text;
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  private onFindKeyDown(e: KeyboardEvent, onClose: () => void) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      this.withCM(e.shiftKey ? findPrevious : findNext);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  }
+
+  private withCM(command: (cm: CodeMirrorView) => unknown) {
+    const cm = findCodeMirrorView(this.block);
+    if (!cm) return;
+    command(cm);
+    this.updateCount(cm);
+  }
+
+  private commitQuery() {
+    const cm = findCodeMirrorView(this.block);
+    if (!cm) return;
+    cm.dispatch({ effects: setSearchQuery.of(buildSearchQuery(this.findInput.value, this.replaceInput.value)) });
+    this.updateCount(cm);
+  }
+
+  private updateCount(cm: CodeMirrorView) {
+    if (!this.findInput.value) {
+      this.countLabel.textContent = "";
+      return;
+    }
+    const count = countMatches(cm, getSearchQuery(cm.state));
+    this.countLabel.textContent =
+      count === 0 ? "No results" : `${count}${count > MAX_COUNTED_MATCHES ? "+" : ""} match${count === 1 ? "" : "es"}`;
+  }
+
+  focus() {
+    this.findInput.focus();
+    this.findInput.select();
+  }
+
+  private onDragStart = (e: PointerEvent) => {
+    if (e.target instanceof HTMLElement && e.target.closest(".search-popup-close")) return;
+    e.preventDefault();
+    this.dragPointerId = e.pointerId;
+    this.dragHandle.setPointerCapture(e.pointerId);
+    this.dragStart = {
+      x: e.clientX,
+      y: e.clientY,
+      top: parseFloat(this.dom.style.top) || 0,
+      left: parseFloat(this.dom.style.left) || 0,
+    };
+  };
+
+  private onDragMove = (e: PointerEvent) => {
+    if (this.dragPointerId !== e.pointerId) return;
+    const top = this.dragStart.top + (e.clientY - this.dragStart.y);
+    const left = this.dragStart.left + (e.clientX - this.dragStart.x);
+    this.pinnedPos = { top, left };
+    this.dom.style.top = `${top}px`;
+    this.dom.style.left = `${left}px`;
+  };
+
+  private onDragEnd = (e: PointerEvent) => {
+    if (this.dragPointerId !== e.pointerId) return;
+    this.dragHandle.releasePointerCapture(e.pointerId);
+    this.dragPointerId = null;
+  };
+
+  /** Re-anchors just under `anchorRect` (the tools bar, in viewport
+   * coordinates - same rect CodeBlockGripsView positions the toolbar
+   * buttons against) unless the user has already dragged this popup
+   * somewhere of their own choosing. */
+  reposition(anchorRect: DOMRect) {
+    if (this.pinnedPos) return;
+    const fixed = toFixedRect(this.dom, anchorRect);
+    const width = this.dom.offsetWidth || 260;
+    this.dom.style.top = `${fixed.top + fixed.height + 6}px`;
+    this.dom.style.left = `${fixed.left + fixed.width - width}px`;
+  }
+
+  destroy() {
+    this.dom.remove();
+  }
+}
+
+/** Gap (px) kept between the tools bar's right edge and whichever button
+ * ends up outermost, matching the original delete-button-only spacing. */
+const EDGE_GAP = 10;
+/** Gap (px) between adjacent floating buttons. */
+const BTN_GAP = 4;
+
+const EXPANDED_CLASS = "cb-expanded";
+
+interface BlockButtons {
+  del: HTMLButtonElement;
+  expand: HTMLButtonElement;
+  copy: HTMLButtonElement;
+  zoomIn: HTMLButtonElement;
+  zoomOut: HTMLButtonElement;
+  search: HTMLButtonElement;
+  /** Pending revert-to-copy-icon timer, if a "copied" checkmark is showing. */
+  copyResetTimer: number | undefined;
+}
+
+/** Finds the nearest ancestor that becomes the CSS containing block for one
+ * of `el`'s `position: fixed` descendants, instead of the viewport - i.e.
+ * any ancestor with a `transform`, `perspective`, `filter`, or
+ * `backdrop-filter` other than `none`, a `will-change` naming one of those,
+ * or a `contain` of `paint`/`layout`/`strict`/`content`. Returns null if no
+ * such ancestor exists, meaning the viewport is the containing block (the
+ * common case). See expandedRectTarget's doc comment for why this matters
+ * here specifically. */
+function findFixedContainingBlock(el: HTMLElement): HTMLElement | null {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (
+      style.transform !== "none" ||
+      style.perspective !== "none" ||
+      style.filter !== "none" ||
+      style.backdropFilter !== "none" ||
+      /transform|perspective|filter/.test(style.willChange) ||
+      /paint|layout|strict|content/.test(style.contain)
+    ) {
+      return node;
+    }
+  }
+  return null;
+}
+
+/** Converts a viewport-relative rect into the coordinate space `el` is
+ * actually positioned in once it becomes `position: fixed` - relative to
+ * `findFixedContainingBlock(el)` when that returns an ancestor, unchanged
+ * (viewport-relative) otherwise. Used for both the expanded code block
+ * itself and its floating buttons, which share the same ancestor chain (see
+ * expandedRectTarget's doc comment) and so the same containing block once
+ * either one is fixed. */
+function toFixedRect(el: HTMLElement, rect: DOMRect): DOMRect {
+  const containingBlock = findFixedContainingBlock(el);
+  if (!containingBlock) return rect;
+
+  const cbRect = containingBlock.getBoundingClientRect();
+  const cbStyle = getComputedStyle(containingBlock);
+  const cbBorderLeft = parseFloat(cbStyle.borderLeftWidth) || 0;
+  const cbBorderTop = parseFloat(cbStyle.borderTopWidth) || 0;
+  return new DOMRect(
+    rect.left - cbRect.left - cbBorderLeft,
+    rect.top - cbRect.top - cbBorderTop,
+    rect.width,
+    rect.height,
+  );
+}
+
+/** Per-editor overlay: one set of floating tool buttons per code block -
+ * remove, expand/collapse ("make this code block fill the note"), copy,
+ * zoom out, zoom in, and find/replace - floated in place of the tools bar's
+ * Copy button (hidden via CSS - see index.css). Lives in the Milkdown mount
+ * div (a sibling of `editorView.dom`, not a child of it) rather than
+ * actually replacing the Copy button in the DOM, because that button
+ * belongs to the vendored `codeBlockComponent`'s own Vue tree, which would
+ * just re-render over any node inserted into it directly - same reasoning
+ * as TableOverlay in tableGrips.ts. */
 class CodeBlockGripsView implements PluginView {
   private view: EditorView;
   private host: HTMLElement | null = null;
-  private buttons = new Map<HTMLElement, HTMLButtonElement>();
+  private buttons = new Map<HTMLElement, BlockButtons>();
+  // At most one search popup per block, but unlike expandedBlock, several
+  // blocks can each have their own open at once - they don't conflict the
+  // way two fullscreen blocks would.
+  private searchPopups = new Map<HTMLElement, SearchPopup>();
+  // At most one code block is expanded at a time - expanding a second one
+  // collapses whichever was already expanded first (see setExpanded).
+  private expandedBlock: HTMLElement | null = null;
   private resizeObserver = new ResizeObserver(() => this.repositionAll());
   // The tools bar this positions against doesn't exist yet at mount time -
   // CodeMirror (and the Vue-rendered `.tools` bar inside it) only
@@ -70,6 +438,8 @@ class CodeBlockGripsView implements PluginView {
   constructor(view: EditorView) {
     this.view = view;
     this.sync();
+    window.addEventListener("resize", this.onWindowResize);
+    window.addEventListener("keydown", this.onKeyDown);
   }
 
   update(view: EditorView, prevState: EditorView["state"]) {
@@ -81,8 +451,88 @@ class CodeBlockGripsView implements PluginView {
   destroy() {
     this.resizeObserver.disconnect();
     this.mutationObserver.disconnect();
-    this.buttons.forEach((btn) => btn.remove());
+    this.buttons.forEach((btns) => {
+      if (btns.copyResetTimer !== undefined) window.clearTimeout(btns.copyResetTimer);
+      btns.del.remove();
+      btns.expand.remove();
+      btns.copy.remove();
+      btns.zoomIn.remove();
+      btns.zoomOut.remove();
+      btns.search.remove();
+    });
     this.buttons.clear();
+    this.searchPopups.forEach((popup) => popup.destroy());
+    this.searchPopups.clear();
+    window.removeEventListener("resize", this.onWindowResize);
+    window.removeEventListener("keydown", this.onKeyDown);
+  }
+
+  private onWindowResize = () => {
+    if (this.expandedBlock) this.repositionAll();
+  };
+
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || !this.expandedBlock) return;
+    e.preventDefault();
+    this.setExpanded(this.expandedBlock, false);
+  };
+
+  private makeButton(className: string, icon: string, title: string, ariaLabel: string, onClick: () => void) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `code-block-tool-btn ${className}`;
+    btn.innerHTML = icon;
+    btn.title = title;
+    btn.setAttribute("aria-label", ariaLabel);
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  private copyCode(block: HTMLElement, btns: BlockButtons) {
+    const cm = findCodeMirrorView(block);
+    const text = cm ? cm.state.doc.toString() : (block.querySelector(".cm-content")?.textContent ?? "");
+    navigator.clipboard.writeText(text).then(() => {
+      if (btns.copyResetTimer !== undefined) window.clearTimeout(btns.copyResetTimer);
+      btns.copy.innerHTML = CHECK_ICON;
+      btns.copy.classList.add("copied");
+      btns.copyResetTimer = window.setTimeout(() => {
+        btns.copy.innerHTML = COPY_ICON;
+        btns.copy.classList.remove("copied");
+        btns.copyResetTimer = undefined;
+      }, COPIED_FEEDBACK_MS);
+    });
+  }
+
+  /** Opens or closes this block's find/replace popup (see SearchPopup).
+   * Unlike setExpanded, opening one never closes another block's - see the
+   * searchPopups field's own comment. */
+  private toggleSearchPopup(block: HTMLElement) {
+    if (this.searchPopups.has(block)) {
+      this.closeSearchPopup(block);
+      return;
+    }
+    const cm = findCodeMirrorView(block);
+    if (!cm || !this.host) return;
+    // Turns on @codemirror/search's match-highlight decorations and mounts
+    // its (CSS-hidden, see index.css) placeholder panel - see codeBlock.ts's
+    // `createPanel` for why an empty panel still has to exist here.
+    openSearchPanel(cm);
+    const popup = new SearchPopup(block, () => this.closeSearchPopup(block));
+    this.host.append(popup.dom);
+    this.searchPopups.set(block, popup);
+    const toolsRect = (block.querySelector(".tools") ?? block).getBoundingClientRect();
+    popup.reposition(toolsRect);
+    popup.focus();
+  }
+
+  private closeSearchPopup(block: HTMLElement) {
+    const popup = this.searchPopups.get(block);
+    if (!popup) return;
+    const cm = findCodeMirrorView(block);
+    if (cm) closeSearchPanel(cm);
+    popup.destroy();
+    this.searchPopups.delete(block);
   }
 
   private sync() {
@@ -94,25 +544,69 @@ class CodeBlockGripsView implements PluginView {
     }
 
     const current = new Set(Array.from(this.view.dom.querySelectorAll(".milkdown-code-block")) as HTMLElement[]);
-    for (const [block, btn] of this.buttons) {
+    for (const [block, btns] of this.buttons) {
       if (!current.has(block)) {
-        btn.remove();
+        if (this.expandedBlock === block) this.setExpanded(block, false);
+        this.closeSearchPopup(block);
+        if (btns.copyResetTimer !== undefined) window.clearTimeout(btns.copyResetTimer);
+        btns.del.remove();
+        btns.expand.remove();
+        btns.copy.remove();
+        btns.zoomIn.remove();
+        btns.zoomOut.remove();
+        btns.search.remove();
         this.resizeObserver.unobserve(block);
         this.buttons.delete(block);
       }
     }
     current.forEach((block) => {
       if (this.buttons.has(block)) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "code-block-delete-btn";
-      btn.title = "Remove";
-      btn.setAttribute("aria-label", "Remove code block");
-      btn.textContent = "×";
-      btn.addEventListener("mousedown", (e) => e.preventDefault());
-      btn.addEventListener("click", () => deleteCodeBlock(this.view, block));
-      host.append(btn);
-      this.buttons.set(block, btn);
+
+      const del = this.makeButton("code-block-delete-btn", "×", "Remove", "Remove code block", () =>
+        deleteCodeBlock(this.view, block),
+      );
+      del.textContent = "×";
+
+      const expand = this.makeButton(
+        "code-block-expand-btn",
+        MAXIMIZE_ICON,
+        "Expand to fill the note",
+        "Expand code block to fill the note",
+        () => this.setExpanded(block, block !== this.expandedBlock),
+      );
+
+      const btns: BlockButtons = {
+        del,
+        expand,
+        copy: this.makeButton("code-block-copy-btn", COPY_ICON, "Copy code", "Copy code block contents", () =>
+          this.copyCode(block, btns),
+        ),
+        zoomIn: this.makeButton(
+          "code-block-zoom-btn",
+          ZOOM_IN_ICON,
+          "Zoom in",
+          "Increase code block font size",
+          () => zoomBy(block, FONT_STEP),
+        ),
+        zoomOut: this.makeButton(
+          "code-block-zoom-btn",
+          ZOOM_OUT_ICON,
+          "Zoom out",
+          "Decrease code block font size",
+          () => zoomBy(block, -FONT_STEP),
+        ),
+        search: this.makeButton(
+          "code-block-search-btn",
+          SEARCH_ICON,
+          "Find and replace",
+          "Find and replace in code block",
+          () => this.toggleSearchPopup(block),
+        ),
+        copyResetTimer: undefined,
+      };
+
+      host.append(del, expand, btns.copy, btns.zoomIn, btns.zoomOut, btns.search);
+      this.buttons.set(block, btns);
       this.resizeObserver.observe(block);
       this.mutationObserver.observe(block, { childList: true, subtree: true });
     });
@@ -120,17 +614,115 @@ class CodeBlockGripsView implements PluginView {
     this.repositionAll();
   }
 
+  /** Toggles a code block between its normal in-flow size and filling the
+   * whole note editor pane (toolbar included - see Editor.tsx's
+   * `data-note-editor-root`). Implemented as a CSS class plus custom
+   * properties carrying that pane's live rect (see .cb-expanded in
+   * index.css) rather than reparenting the block's DOM: this node's `dom`
+   * is a ProseMirror NodeView, and moving it out from under `view.dom`
+   * would leave ProseMirror's own view-desc tree out of sync with the real
+   * DOM (see deleteCodeBlock's doc comment for the same NodeView-fragility
+   * concern). `position: fixed` escapes the note's scroll/overflow
+   * clipping without any of that risk. */
+  private setExpanded(block: HTMLElement, expand: boolean) {
+    if (expand && this.expandedBlock && this.expandedBlock !== block) {
+      this.setExpanded(this.expandedBlock, false);
+    }
+
+    const btns = this.buttons.get(block);
+    block.classList.toggle(EXPANDED_CLASS, expand);
+    if (btns) {
+      btns.expand.innerHTML = expand ? MINIMIZE_ICON : MAXIMIZE_ICON;
+      btns.expand.title = expand ? "Collapse" : "Expand to fill the note";
+      btns.expand.setAttribute("aria-label", expand ? "Collapse code block" : "Expand code block to fill the note");
+    }
+
+    if (expand) {
+      this.expandedBlock = block;
+    } else {
+      if (this.expandedBlock === block) this.expandedBlock = null;
+      block.style.removeProperty("--cb-rect-top");
+      block.style.removeProperty("--cb-rect-left");
+      block.style.removeProperty("--cb-rect-width");
+      block.style.removeProperty("--cb-rect-height");
+    }
+    this.repositionAll();
+  }
+
+  /** The note editor's own root (toolbar + note area, not just the visible
+   * viewport) - see Editor.tsx. Falls back to the whole page if a code
+   * block somehow renders outside it.
+   *
+   * Expressed via toFixedRect in the coordinate space `block` will actually
+   * be `position: fixed` against, which is *not* always the viewport:
+   * App.tsx wraps the editor pane in a `<main>` with `.glass-panel`'s
+   * `backdrop-filter`, and a `backdrop-filter` ancestor becomes the
+   * containing block for fixed descendants instead of the viewport (same
+   * rule as `transform`/`filter`/`perspective`/`contain`). That ancestor
+   * (`<main>`) also has `overflow: hidden`, so getting this wrong doesn't
+   * just misplace the expanded block - it gets clipped to a smaller,
+   * offset box. */
+  private expandedRectTarget(block: HTMLElement): DOMRect {
+    const container = block.closest<HTMLElement>("[data-note-editor-root]") ?? document.body;
+    return toFixedRect(block, container.getBoundingClientRect());
+  }
+
   private repositionAll() {
     if (!this.host) return;
+
+    if (this.expandedBlock) {
+      const rect = this.expandedRectTarget(this.expandedBlock);
+      this.expandedBlock.style.setProperty("--cb-rect-top", `${rect.top}px`);
+      this.expandedBlock.style.setProperty("--cb-rect-left", `${rect.left}px`);
+      this.expandedBlock.style.setProperty("--cb-rect-width", `${rect.width}px`);
+      this.expandedBlock.style.setProperty("--cb-rect-height", `${rect.height}px`);
+    }
+
     const hostRect = this.host.getBoundingClientRect();
-    this.buttons.forEach((btn, block) => {
-      // Anchor to the tools bar itself (not the block) so the button lands
+    this.buttons.forEach((btns, block) => {
+      const isExpanded = block === this.expandedBlock;
+      // Anchor to the tools bar itself (not the block) so the buttons land
       // exactly in the Copy button's old slot regardless of the tools bar's
       // padding/height, which are set in CSS rather than known here.
       const toolsRect = (block.querySelector(".tools") ?? block).getBoundingClientRect();
-      const btnRect = btn.getBoundingClientRect();
-      btn.style.top = `${toolsRect.top - hostRect.top + (toolsRect.height - btnRect.height) / 2}px`;
-      btn.style.left = `${toolsRect.right - hostRect.left - btnRect.width - 10}px`;
+
+      // The delete button is irrelevant mid-edit (and its usual
+      // host-relative math would place it back at the block's old in-flow
+      // slot while the block itself is fixed) - hidden whenever expanded.
+      // Search/zoom/copy stay available while expanded, same as the
+      // remaining expand button, which switches to "collapse".
+      btns.del.style.display = isExpanded ? "none" : "";
+      const visible = isExpanded
+        ? [btns.expand, btns.copy, btns.zoomIn, btns.zoomOut, btns.search]
+        : [btns.del, btns.expand, btns.copy, btns.zoomIn, btns.zoomOut, btns.search];
+
+      // While expanded, the block itself is `position: fixed` (see
+      // .cb-expanded in index.css), so `toolsRect` is already a viewport
+      // rect - each visible button switches to `fixed` too, positioned
+      // against whatever ancestor actually forms its containing block (see
+      // toFixedRect's doc comment), which isn't necessarily the viewport.
+      const fixedToolsRect = isExpanded ? toFixedRect(btns.expand, toolsRect) : null;
+
+      let offset = EDGE_GAP;
+      for (const btn of visible) {
+        btn.style.position = isExpanded ? "fixed" : "absolute";
+        btn.style.zIndex = isExpanded ? "31" : "";
+        const rect = btn.getBoundingClientRect();
+        if (fixedToolsRect) {
+          btn.style.top = `${fixedToolsRect.top + (fixedToolsRect.height - rect.height) / 2}px`;
+          btn.style.left = `${fixedToolsRect.left + fixedToolsRect.width - offset - rect.width}px`;
+        } else {
+          btn.style.top = `${toolsRect.top - hostRect.top + (toolsRect.height - rect.height) / 2}px`;
+          btn.style.left = `${toolsRect.right - hostRect.left - offset - rect.width}px`;
+        }
+        offset += rect.width + BTN_GAP;
+      }
+
+      // toolsRect works as the popup's anchor whether or not the block is
+      // expanded - reposition() itself is a no-op once the user has dragged
+      // it (see SearchPopup.pinnedPos), same "anchor until placed" idea as
+      // the expand button switching to `position: fixed` above.
+      this.searchPopups.get(block)?.reposition(toolsRect);
     });
   }
 }

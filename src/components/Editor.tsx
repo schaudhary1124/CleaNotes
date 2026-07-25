@@ -37,6 +37,7 @@ import {
   createCodeBlockCommand,
   insertHrCommand,
   insertImageCommand,
+  linkSchema,
   toggleEmphasisCommand,
   toggleStrongCommand,
   wrapInHeadingCommand,
@@ -44,7 +45,7 @@ import {
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
 import { getNoteLook, readSketch, setNoteLook, writeAttachment, writeSketch } from "../utils/fsNotes";
-import type { BlockStyle, EditorSelectionState } from "../milkdown/setup";
+import type { BlockStyle, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
 import { getSelectionState, registerMilkdownPlugins } from "../milkdown/setup";
 import { setBlockAlign, setTableColumnAlign } from "../milkdown/alignmentCommands";
 import type { BlockAlign } from "../milkdown/alignmentSchemaExtensions";
@@ -76,8 +77,17 @@ import {
   resolveGestureRange,
 } from "../milkdown/sketchDecorations";
 import { clearFormatting } from "../milkdown/formatCommands";
+import { buildNoteLinkHref, describeNoteLinkTarget, parseNoteLinkHref, type NoteLinkTarget } from "../milkdown/noteLinkHref";
+import { confirmNoteLinkTrigger, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "../milkdown/noteLinkTrigger";
+import { notePinSchema } from "../milkdown/notePin";
+import { NOTE_PIN_CLICKED_EVENT, type NotePinClickedDetail } from "../milkdown/notePinView";
+import { noteLinkChipSchema } from "../milkdown/noteLinkChip";
+import { LINK_CLICKED_EVENT, openLinkHref, type LinkClickedDetail } from "../milkdown/noteLinkClick";
 import { SketchLayer } from "./SketchLayer";
 import { DEFAULT_SKETCH_COLOR, SKETCH_TOOL_SIZES, SketchToolbar } from "./SketchToolbar";
+import { filterNoteChoices, NoteLinkResultsList, type NoteLinkChoice } from "./NoteLinkPicker";
+import { ToolbarPopover } from "./ToolbarPopover";
+import { LinkPopover, NotePinPopover, SelectionLinkToolbar } from "./SelectionLinkToolbar";
 import type { NoteLook, SketchStroke, SketchTool } from "../types";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved";
@@ -90,6 +100,16 @@ interface EditorProps {
   toolbarVisible: boolean;
   sketchMode: boolean;
   onToggleSketchMode: () => void;
+  /** Every note in the vault, for the "link to a note" picker - not just the current one. */
+  noteChoices: NoteLinkChoice[];
+  /** Cmd/Ctrl-clicking an internal note:// link calls this with its target. */
+  onNavigateToNoteLink: (target: NoteLinkTarget) => void;
+  /** Set once, right after navigating here via an anchored (heading or notePin) link, so this
+   * mount can scroll to and briefly highlight that target - see the mount effect below. */
+  scrollToAnchorId?: string;
+  /** Called once this mount has acted on `scrollToAnchorId` (found or not), so the caller can
+   * clear its pending state instead of re-triggering on the next unrelated re-render. */
+  onScrolledToAnchor?: () => void;
 }
 
 const AUTOSAVE_DELAY_MS = 1000;
@@ -123,65 +143,6 @@ const NOTE_LOOKS: { value: NoteLook; label: string }[] = [
   { value: "grid", label: "Grid" },
   { value: "index-card", label: "Index card" },
 ];
-
-/** Closes a popover when the user clicks anywhere outside all of `refs`. */
-function useClickOutside(refs: React.RefObject<HTMLElement | null>[], onOutside: () => void, active: boolean) {
-  useEffect(() => {
-    if (!active) return;
-    function handle(e: MouseEvent) {
-      const target = e.target as Node;
-      if (refs.some((r) => r.current?.contains(target))) return;
-      onOutside();
-    }
-    document.addEventListener("mousedown", handle);
-    return () => document.removeEventListener("mousedown", handle);
-  }, [refs, onOutside, active]);
-}
-
-/** Toolbar popovers can't be plain `absolute` children of the toolbar: the
- * toolbar scrolls horizontally (`overflow-x-auto`), and per the CSS overflow
- * spec setting only one axis to `auto` forces the other to `auto` too - so
- * the toolbar clips anything positioned below its own height, leaving the
- * popover in the DOM (clickable via coordinates) but invisible. Portaling to
- * `document.body` with `position: fixed` escapes that clipping box. */
-function ToolbarPopover({
-  anchorRef,
-  onClose,
-  className,
-  children,
-}: {
-  anchorRef: React.RefObject<HTMLElement | null>;
-  onClose: () => void;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [style, setStyle] = useState<React.CSSProperties>({ position: "fixed", visibility: "hidden" });
-
-  useEffect(() => {
-    function place() {
-      const rect = anchorRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setStyle({ position: "fixed", top: rect.bottom + 4, left: rect.left, zIndex: 50 });
-    }
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [anchorRef]);
-
-  useClickOutside([anchorRef, menuRef], onClose, true);
-
-  return createPortal(
-    <div ref={menuRef} style={style} className={className}>
-      {children}
-    </div>,
-    document.body,
-  );
-}
 
 function TextStyleDropdown({
   blockStyle,
@@ -725,9 +686,28 @@ function NoteEditor({
   toolbarVisible,
   sketchMode,
   onToggleSketchMode,
+  noteChoices,
+  onNavigateToNoteLink,
+  scrollToAnchorId,
+  onScrolledToAnchor,
 }: EditorProps) {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // The current selection, only while it's a genuine highlighted text range - drives
+  // SelectionLinkToolbar. See setup.ts's reportSelectionRange for exactly what qualifies.
+  const [selectionRange, setSelectionRange] = useState<EditorSelectionRange | null>(null);
+  // Set by notePinView.ts's click handler (see the NOTE_PIN_CLICKED_EVENT listener below) -
+  // which pin's popover (if any) is open.
+  const [pinPopover, setPinPopover] = useState<NotePinClickedDetail | null>(null);
+  // Set by noteLinkClick.ts's/noteLinkChipView.ts's plain-click handling (see the
+  // LINK_CLICKED_EVENT listener below) - which link's LinkPopover (if any) is open.
+  const [linkPopover, setLinkPopover] = useState<LinkClickedDetail | null>(null);
+  // The `[[` trigger: null while inactive, or the ProseMirror plugin's reported query/coords/
+  // highlighted row while the user is mid-trigger - see noteLinkTrigger.ts.
+  const [noteLinkTrigger, setNoteLinkTrigger] = useState<NoteLinkTriggerInfo | null>(null);
+  // Kept in sync with the trigger's filtered results (see the effect below) so the plugin's own
+  // keyboard handling can read the current list synchronously, without a second callback.
+  const noteLinkResultsRef = useRef<NoteLinkTriggerChoice[]>([]);
   const [selectionState, setSelectionState] = useState<EditorSelectionState>({
     bold: false,
     italic: false,
@@ -760,6 +740,27 @@ function NoteEditor({
     if (selectionState.imageWrap === null) setImageCropping(false);
   }, [selectionState.imageWrap]);
 
+  // Bubbles up from notePinView.ts's click handler on the pin glyph itself - see its own comment
+  // for why this is a DOM CustomEvent rather than something threaded through Milkdown's ctx.
+  useEffect(() => {
+    const onPinClicked = (event: Event) => {
+      setPinPopover((event as CustomEvent<NotePinClickedDetail>).detail);
+    };
+    document.addEventListener(NOTE_PIN_CLICKED_EVENT, onPinClicked);
+    return () => document.removeEventListener(NOTE_PIN_CLICKED_EVENT, onPinClicked);
+  }, []);
+
+  // Bubbles up from a plain click on either link shape - real link-marked text (noteLinkClick.ts)
+  // or a pasted link-chip glyph (noteLinkChipView.ts) - both fire the same event so one popover
+  // here covers both. See LinkPopover's own comment for why they share one component.
+  useEffect(() => {
+    const onLinkClicked = (event: Event) => {
+      setLinkPopover((event as CustomEvent<LinkClickedDetail>).detail);
+    };
+    document.addEventListener(LINK_CLICKED_EVENT, onLinkClicked);
+    return () => document.removeEventListener(LINK_CLICKED_EVENT, onLinkClicked);
+  }, []);
+
   const debouncedSave = useDebouncedCallback(async (value: string) => {
     setStatus("saving");
     await onSave(value);
@@ -781,7 +782,15 @@ function NoteEditor({
       ctx.set(rootCtx, root);
       ctx.set(defaultValueCtx, initialContent);
     });
-    registerMilkdownPlugins(editor, handleChange, setSelectionState);
+    registerMilkdownPlugins(
+      editor,
+      handleChange,
+      setSelectionState,
+      onNavigateToNoteLink,
+      setNoteLinkTrigger,
+      noteLinkResultsRef,
+      setSelectionRange,
+    );
     return editor;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -792,6 +801,42 @@ function NoteEditor({
     },
     [get],
   );
+
+  // Keeps the plugin's synchronous read of "current results" up to date as the trigger's query
+  // changes - the plugin itself can't call React hooks, so this is the other half of the
+  // ref bridge described in noteLinkTrigger.ts.
+  useEffect(() => {
+    noteLinkResultsRef.current = noteLinkTrigger ? filterNoteChoices(noteChoices, noteLinkTrigger.query) : [];
+  }, [noteChoices, noteLinkTrigger]);
+
+  function chooseNoteLinkTriggerResult(choice: NoteLinkTriggerChoice) {
+    run((ctx) => confirmNoteLinkTrigger(ctx, choice));
+  }
+
+  // Runs once per mount: if we navigated here via an anchored link (a heading, or a notePin
+  // planted via "Copy link to this point"), scroll to and briefly highlight that target.
+  // Best-effort - if the id doesn't resolve (e.g. the heading/pin was renamed or removed since
+  // the link was created), this silently does nothing rather than erroring; see
+  // noteLinkHref.ts's module comment for that accepted tradeoff.
+  useEffect(() => {
+    if (!scrollToAnchorId) return;
+    const scrollToTarget = () => {
+      const target = document.getElementById(scrollToAnchorId);
+      if (!target) return false;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("note-link-highlight-flash");
+      setTimeout(() => target.classList.remove("note-link-highlight-flash"), 1600);
+      return true;
+    };
+    // Milkdown's own view usually mounts before this effect runs, but one rAF retry covers the
+    // rare case where the target's layout isn't settled yet on the first attempt.
+    if (!scrollToTarget()) requestAnimationFrame(scrollToTarget);
+    onScrolledToAnchor?.();
+    // notePath is stable for the lifetime of this component (Editor is remounted per-note via a
+    // `key` prop in App) - scrollToAnchorId/onScrolledToAnchor are only meant to be consumed
+    // once, right at this mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- Note look: visual skin, independent of content ------------------
   const [look, setLook] = useState<NoteLook>("plain");
@@ -1047,10 +1092,29 @@ function NoteEditor({
     const file = Array.from(e.clipboardData.items)
       .find((item) => item.kind === "file" && item.type.startsWith("image/"))
       ?.getAsFile();
-    if (!file) return;
+    if (file) {
+      e.preventDefault();
+      e.stopPropagation();
+      insertImageFile(file);
+      return;
+    }
+
+    // A bare note:// link (e.g. one copied via "Copy link to this point") pasted with nothing
+    // selected has no text for "Add link" to attach a mark to - becomes a noteLinkChip glyph
+    // instead of raw URL text. Scoped to hrefs whose note still exists in the vault, so a
+    // stale/renamed link falls through to an ordinary text paste rather than planting a dead
+    // glyph; scoped to the *whole* pasted string (not a substring) so pasting a link alongside
+    // other copied text is left to Milkdown's normal paste handling.
+    const text = e.clipboardData.getData("text/plain").trim();
+    const target = text ? parseNoteLinkHref(text) : null;
+    if (!target || !noteChoices.some((n) => n.path === target.path)) return;
     e.preventDefault();
     e.stopPropagation();
-    insertImageFile(file);
+    run((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const node = noteLinkChipSchema.type(ctx).create({ href: text, linkTitle: describeNoteLinkTarget(target) });
+      view.dispatch(view.state.tr.replaceSelectionWith(node));
+    });
   }
 
   const emphasisGroup: ToolbarAction[] = [
@@ -1147,8 +1211,54 @@ function NoteEditor({
     action: () => runAndSync((ctx) => callCommand(createCodeBlockCommand.key)(ctx)),
   };
 
+  // "Copy link to this point" (SelectionLinkToolbar): plants a notePin at the selection's end
+  // and copies a link to it. Reads the live selection at call time rather than a range captured
+  // when the toolbar first appeared - safe because the toolbar's own buttons preventDefault on
+  // mousedown (see SelectionLinkToolbar.tsx), which keeps ProseMirror's selection untouched even
+  // though DOM focus itself never has to leave the editor for this one (unlike Add Link's popover
+  // input, which does, and which applyPickedLink below relies on the same guarantee for).
+  //
+  // Also collapses the selection to right after the new pin (so the highlighted text doesn't
+  // stay selected once its point has a pin) and clicks the pin's own DOM node - the NodeView's
+  // click handler is what actually opens NotePinPopover (see notePinView.ts), and reusing it here
+  // means the popover opens anchored and wired to `remove` exactly the way a manual click would.
+  async function copyLinkToPoint() {
+    const id = crypto.randomUUID();
+    let planted = false;
+    run((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const { to, empty } = state.selection;
+      if (empty) return;
+      const node = notePinSchema.type(ctx).create({ id });
+      const tr = state.tr.insert(to, node);
+      tr.setSelection(TextSelection.near(tr.doc.resolve(to + node.nodeSize)));
+      view.dispatch(tr);
+      planted = true;
+    });
+    if (!planted) return;
+    document.getElementById(`note-pin-${id}`)?.click();
+    await navigator.clipboard.writeText(buildNoteLinkHref(notePath, { pinId: id }));
+  }
+
+  // "Add link" (SelectionLinkToolbar -> NoteLinkQuickPicker): applies an already-built href
+  // (searched for, or pasted verbatim) to the selection active when the toolbar appeared. Safe to
+  // read `state.selection` fresh here even though the popover's own <input> now holds DOM focus -
+  // that input lives outside the ProseMirror view's DOM (portaled to document.body), so
+  // ProseMirror's selectionchange listener never mirrors it into `state.selection`.
+  function applyPickedLink(href: string, markTitle: string) {
+    runAndSync((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const { from, to, empty } = state.selection;
+      if (empty) return;
+      const mark = linkSchema.type(ctx).create({ href, title: markTitle });
+      view.dispatch(state.tr.addMark(from, to, mark));
+    });
+  }
+
   return (
-    <div className="relative flex h-full flex-col">
+    <div className="relative flex h-full flex-col" data-note-editor-root>
       {toolbarVisible && sketchMode && (
         <SketchToolbar
           tool={sketchTool}
@@ -1301,6 +1411,59 @@ function NoteEditor({
         {status === "saved" && "Saved"}
         {status === "pending" && "Editing…"}
       </div>
+
+      <SelectionLinkToolbar
+        range={sketchMode ? null : selectionRange}
+        notes={noteChoices}
+        onCopyLinkToPoint={copyLinkToPoint}
+        onApplyLink={applyPickedLink}
+      />
+
+      {pinPopover && (
+        <NotePinPopover
+          notePath={notePath}
+          pinId={pinPopover.id}
+          anchorRef={{ current: pinPopover.element }}
+          onRemove={pinPopover.remove}
+          onClose={() => setPinPopover(null)}
+        />
+      )}
+
+      {linkPopover && (
+        <LinkPopover
+          href={linkPopover.href}
+          markTitle={linkPopover.markTitle}
+          anchorRef={{ current: linkPopover.element }}
+          notes={noteChoices}
+          onOpen={() => {
+            openLinkHref(linkPopover.href, onNavigateToNoteLink);
+            setLinkPopover(null);
+          }}
+          onApplyEdit={(href, markTitle) => {
+            linkPopover.applyEdit(href, markTitle);
+            setLinkPopover(null);
+          }}
+          onRemove={linkPopover.remove}
+          onClose={() => setLinkPopover(null)}
+        />
+      )}
+
+      {noteLinkTrigger &&
+        createPortal(
+          <div
+            style={{ position: "fixed", left: noteLinkTrigger.coords.left, top: noteLinkTrigger.coords.top + 4, zIndex: 50 }}
+            className="glass-surface shadow-app-lg w-64 rounded-xl p-1.5"
+          >
+            <NoteLinkResultsList
+              results={filterNoteChoices(noteChoices, noteLinkTrigger.query)}
+              activeIndex={noteLinkTrigger.activeIndex}
+              onHoverIndex={() => {}}
+              onChoose={chooseNoteLinkTriggerResult}
+              emptyMessage="No matching notes."
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import type { MarkType } from "@milkdown/kit/prose/model";
 import type { EditorState } from "@milkdown/kit/prose/state";
+import { TextSelection } from "@milkdown/kit/prose/state";
 import { isInTable } from "@milkdown/kit/prose/tables";
 import { getBlockAlign, getTableCellAlign } from "./alignmentCommands";
 import { alignmentSidecarRemark, configureAlignmentSchemas, type BlockAlign } from "./alignmentSchemaExtensions";
@@ -21,6 +22,14 @@ import { imageSchemaExt, imageWrapSidecarRemark, type ImageWrap } from "./imageS
 import { imageView } from "./imageView";
 import { getListState, type ListState } from "./listCommands";
 import { taskListToggle } from "./taskListToggle";
+import { noteLinkClickPlugin } from "./noteLinkClick";
+import type { NoteLinkTarget } from "./noteLinkHref";
+import { noteLinkTriggerPlugin, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "./noteLinkTrigger";
+import { notePinPlugins } from "./notePin";
+import { notePinView } from "./notePinView";
+import { noteLinkChipPlugins } from "./noteLinkChip";
+import { noteLinkChipView } from "./noteLinkChipView";
+import type { RefObject } from "react";
 import { tabTrap } from "./tabTrap";
 import { tableLineBreak } from "./tableLineBreak";
 import { tableCellBreakRemark, tableSchemaExtensionPlugins, tableSidecarRemark } from "./tableSchemaExtensions";
@@ -74,6 +83,13 @@ export function getSelectionState(ctx: Ctx): EditorSelectionState {
   };
 }
 
+/** `{from, to}` of the current selection, reported only while it's a genuine highlighted text
+ * range - see reportSelectionRange below. Drives the floating selection toolbar in Editor.tsx. */
+export interface EditorSelectionRange {
+  from: number;
+  to: number;
+}
+
 /** Assembles the full Milkdown plugin set used by the note editor: GFM +
  * commonmark formatting, undo/redo, clipboard/paste handling, the resolved
  * image view, and the custom flashcard/MCQ block. */
@@ -81,10 +97,25 @@ export function registerMilkdownPlugins(
   editor: Editor,
   onMarkdownUpdated: (markdown: string) => void,
   onSelectionStateChanged?: (state: EditorSelectionState) => void,
+  onNavigateToNoteLink?: (target: NoteLinkTarget) => void,
+  onNoteLinkTriggerChange?: (info: NoteLinkTriggerInfo | null) => void,
+  noteLinkResultsRef?: RefObject<NoteLinkTriggerChoice[]>,
+  onSelectionRangeChanged?: (range: EditorSelectionRange | null) => void,
 ) {
   function reportSelectionState(ctx: Ctx) {
     if (!onSelectionStateChanged) return;
     onSelectionStateChanged(getSelectionState(ctx));
+  }
+
+  // Only a non-empty plain-text selection counts - a collapsed cursor has nothing to link, and a
+  // NodeSelection (an image, a table cell range) already has its own contextual toolbar
+  // (SelectedImageToolbar/TableMenu), so this deliberately stays out of their way.
+  function reportSelectionRange(ctx: Ctx) {
+    if (!onSelectionRangeChanged) return;
+    const { selection } = ctx.get(editorViewCtx).state;
+    onSelectionRangeChanged(
+      selection instanceof TextSelection && !selection.empty ? { from: selection.from, to: selection.to } : null,
+    );
   }
 
   return editor
@@ -94,11 +125,19 @@ export function registerMilkdownPlugins(
         .markdownUpdated((_ctx, markdown, prevMarkdown) => {
           if (markdown !== prevMarkdown) onMarkdownUpdated(markdown);
         })
-        .updated((updatedCtx) => reportSelectionState(updatedCtx))
+        .updated((updatedCtx) => {
+          reportSelectionState(updatedCtx);
+          reportSelectionRange(updatedCtx);
+        })
         // selectionUpdated fires from inside the plugin's state.apply, before
         // view.state has been reassigned to the new state - read on the next
         // microtask so editorViewCtx reflects the transaction that just landed.
-        .selectionUpdated((updatedCtx) => queueMicrotask(() => reportSelectionState(updatedCtx)));
+        .selectionUpdated((updatedCtx) =>
+          queueMicrotask(() => {
+            reportSelectionState(updatedCtx);
+            reportSelectionRange(updatedCtx);
+          }),
+        );
       ctx.update(codeBlockConfig.key, (prev) => ({
         ...prev,
         languages: codeBlockLanguages,
@@ -170,6 +209,26 @@ export function registerMilkdownPlugins(
     .use(cursor)
     .use(imageView)
     .use(taskListToggle)
+    // The `notePin` atom node ("Copy link to this point" in the selection toolbar - see
+    // notePin.ts/notePinView.ts) and its markdown round-trip. Same ordering requirement as the
+    // other sidecar remarks: must come after commonmark/gfm above.
+    .use(notePinPlugins)
+    .use(notePinView)
+    // The `noteLinkChip` atom (a pasted-with-no-selection note:// link, standing in for a `link`
+    // mark - see noteLinkChip.ts/noteLinkChipView.ts). Same ordering requirement as notePinPlugins.
+    .use(noteLinkChipPlugins)
+    .use(noteLinkChipView((target) => onNavigateToNoteLink?.(target)))
+    // Click handling (LinkPopover) and Cmd/Ctrl-click fast-path navigation for `link`-marked
+    // text - see noteLinkClick.ts.
+    .use(noteLinkClickPlugin((target) => onNavigateToNoteLink?.(target)))
+    // The `[[` live autocomplete trigger - see noteLinkTrigger.ts. Registered after
+    // noteLinkClickPlugin (no ordering requirement between the two, just grouped together).
+    .use(
+      noteLinkTriggerPlugin({
+        onTriggerChange: (info) => onNoteLinkTriggerChange?.(info),
+        resultsRef: noteLinkResultsRef ?? { current: [] },
+      }),
+    )
     // Registered last so the list-sink and table-next-cell Tab shortcuts
     // above get first chance at the key - see tabTrap.ts.
     .use(tabTrap);

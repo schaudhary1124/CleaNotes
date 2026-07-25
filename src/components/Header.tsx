@@ -3,8 +3,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowLeft,
   Copy,
-  Menu,
   Minus,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelTopClose,
   PanelTopOpen,
   Pin,
@@ -27,9 +28,17 @@ interface HeaderProps {
   onCloseSettings: () => void;
   toolbarVisible: boolean;
   onToggleToolbar: () => void;
-  /** Opens the sidebar - only rendered once the app is narrow enough for the sidebar to have
-   * become an overlay (see Sidebar.tsx's own @max-2xl: classes, which this button matches). */
+  /** Whether the sidebar overlay is currently open - only meaningful once the app is narrow
+   * enough for the sidebar to have become an overlay (see Sidebar.tsx's own @max-2xl: classes). */
+  sidebarOpen: boolean;
+  /** Opens the sidebar overlay - only rendered once the app is narrow enough for the sidebar to
+   * have become an overlay (see Sidebar.tsx's own @max-2xl: classes, which this button matches). */
   onToggleSidebar: () => void;
+  /** Whether the sidebar is manually collapsed at normal (non-overlay) widths. */
+  sidebarCollapsed: boolean;
+  /** Collapses/expands the sidebar - only rendered at widths where it isn't already an overlay,
+   * complementing onToggleSidebar above. */
+  onToggleSidebarCollapse: () => void;
   /** The open-tabs strip, rendered left-aligned next to the back button. */
   tabStrip?: React.ReactNode;
 }
@@ -47,7 +56,10 @@ export function Header({
   onCloseSettings,
   toolbarVisible,
   onToggleToolbar,
+  sidebarOpen,
   onToggleSidebar,
+  sidebarCollapsed,
+  onToggleSidebarCollapse,
   tabStrip,
 }: HeaderProps) {
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
@@ -82,10 +94,19 @@ export function Header({
               type="button"
               onClick={onToggleSidebar}
               className="btn-ghost hidden h-6 w-6 shrink-0 @max-2xl:flex"
-              title="Toggle sidebar"
-              aria-label="Toggle sidebar"
+              title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
             >
-              <Menu size={15} />
+              {sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+            </button>
+            <button
+              type="button"
+              onClick={onToggleSidebarCollapse}
+              className="btn-ghost flex h-6 w-6 shrink-0 @max-2xl:hidden"
+              title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+              aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
             </button>
             {view === "note" && (
               <button

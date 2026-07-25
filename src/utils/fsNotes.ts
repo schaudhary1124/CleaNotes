@@ -39,6 +39,8 @@ const META_FILE = "plainotes-meta.json";
 // No leading dot, same reasoning as META_FILE above. This is a cache the search
 // index rebuilds from if missing or unreadable, so it's fine to skip it silently.
 const SEARCH_INDEX_FILE = "plainotes-search-index.json";
+// No leading dot, same reasoning as SEARCH_INDEX_FILE above - also just a rebuildable cache.
+const BACKLINKS_INDEX_FILE = "plainotes-backlinks-index.json";
 const BASE_DIR = BaseDirectory.Document;
 
 export const STARTER_CONTENT = "";
@@ -117,6 +119,19 @@ export async function readSearchIndexFile(): Promise<string | null> {
 
 export function writeSearchIndexFile(json: string): Promise<void> {
   return writeTextFile(fullPath(SEARCH_INDEX_FILE), json, { baseDir: BASE_DIR });
+}
+
+/** Reads the persisted backlinks index cache, or null if it doesn't exist yet / is unreadable. */
+export async function readBacklinksIndexFile(): Promise<string | null> {
+  try {
+    return await readTextFile(fullPath(BACKLINKS_INDEX_FILE), { baseDir: BASE_DIR });
+  } catch {
+    return null;
+  }
+}
+
+export function writeBacklinksIndexFile(json: string): Promise<void> {
+  return writeTextFile(fullPath(BACKLINKS_INDEX_FILE), json, { baseDir: BASE_DIR });
 }
 
 /** Last-modified time of a note, in epoch ms - used to detect notes changed outside the app. */
