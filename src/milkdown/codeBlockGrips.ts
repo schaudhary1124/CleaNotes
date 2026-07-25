@@ -130,12 +130,22 @@ function buildSearchQuery(search: string, replace: string): SearchQuery {
   return new SearchQuery({ search, replace, caseSensitive: false, literal: true, regexp: false, wholeWord: false });
 }
 
-function countMatches(cm: CodeMirrorView, query: SearchQuery): number {
-  if (!query.valid) return 0;
+/** Total match count, plus this match's 1-based position among them (0 if
+ * the current selection isn't sitting on a match) - the popup shows this as
+ * "3 of 7" the way VS Code's find widget does, since a bare total leaves no
+ * way to tell which of several identical-looking highlights (see
+ * .cm-searchMatch-selected below) Previous/Next just landed on. */
+function matchStats(cm: CodeMirrorView, query: SearchQuery): { total: number; current: number } {
+  if (!query.valid) return { total: 0, current: 0 };
+  const sel = cm.state.selection.main;
   const cursor = query.getCursor(cm.state);
-  let count = 0;
-  while (count <= MAX_COUNTED_MATCHES && !cursor.next().done) count++;
-  return count;
+  let total = 0;
+  let current = 0;
+  for (let next = cursor.next(); total <= MAX_COUNTED_MATCHES && !next.done; next = cursor.next()) {
+    total++;
+    if (next.value.from === sel.from && next.value.to === sel.to) current = total;
+  }
+  return { total, current };
 }
 
 /** A small draggable find/replace popup for one code block, backed by
@@ -218,8 +228,8 @@ class SearchPopup {
 
     this.dom.append(this.dragHandle, findRow, replaceRow);
 
-    this.findInput.addEventListener("input", () => this.commitQuery());
-    this.replaceInput.addEventListener("input", () => this.commitQuery());
+    this.findInput.addEventListener("input", () => this.commitQuery(true));
+    this.replaceInput.addEventListener("input", () => this.commitQuery(false));
     this.findInput.addEventListener("keydown", (e) => this.onFindKeyDown(e, onClose));
     this.replaceInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
@@ -268,14 +278,35 @@ class SearchPopup {
     const cm = findCodeMirrorView(this.block);
     if (!cm) return;
     command(cm);
-    this.updateCount(cm);
+    this.syncAfterCommand(cm);
   }
 
-  private commitQuery() {
+  /** `selectFirstMatch` is true only when the *find* text just changed (not
+   * the replace text) - @codemirror/search's `replaceNext` only replaces the
+   * match the selection is already sitting on, and otherwise just silently
+   * selects it without replacing anything (see its `isSelectionOfMatch`
+   * check). Without this, the Replace button did nothing at all on a fresh
+   * query, since typing a query alone never moved the selection onto a
+   * match - the first click would only select it, requiring a confusing
+   * second click to actually replace. Calling findNext here as soon as the
+   * query changes (mirroring VS Code's own find-as-you-type) means a match
+   * is already selected by the time the user reaches for Replace. Skipped
+   * for replace-text edits so that editing what to replace with doesn't
+   * itself jump the selection off whatever match Next/Previous just landed
+   * on. */
+  private commitQuery(selectFirstMatch: boolean) {
     const cm = findCodeMirrorView(this.block);
     if (!cm) return;
     cm.dispatch({ effects: setSearchQuery.of(buildSearchQuery(this.findInput.value, this.replaceInput.value)) });
+    if (selectFirstMatch) findNext(cm);
+    this.syncAfterCommand(cm);
+  }
+
+  /** Runs after any command that can move the selection to a (possibly new)
+   * match - keeps the count label and scroll position in step with it. */
+  private syncAfterCommand(cm: CodeMirrorView) {
     this.updateCount(cm);
+    this.scrollCurrentMatchIntoView(cm);
   }
 
   private updateCount(cm: CodeMirrorView) {
@@ -283,9 +314,59 @@ class SearchPopup {
       this.countLabel.textContent = "";
       return;
     }
-    const count = countMatches(cm, getSearchQuery(cm.state));
+    const { total, current } = matchStats(cm, getSearchQuery(cm.state));
+    const suffix = total > MAX_COUNTED_MATCHES ? "+" : "";
     this.countLabel.textContent =
-      count === 0 ? "No results" : `${count}${count > MAX_COUNTED_MATCHES ? "+" : ""} match${count === 1 ? "" : "es"}`;
+      total === 0
+        ? "No results"
+        : // `current` is 0 right after a replace empties the doc's last match, or
+          // any other time the selection isn't sitting on one - falls back to the
+          // plain total rather than claiming a position that doesn't exist.
+          current === 0
+          ? `${total}${suffix} match${total === 1 ? "" : "es"}`
+          : `${current} of ${total}${suffix}`;
+  }
+
+  /** Centers the current match within the block's own `.cm-scroller` -
+   * and *only* that scroller. Native `Element.scrollIntoView()` (and
+   * @codemirror/search's own default `scrollToMatch`, disabled in
+   * codeBlock.ts for this reason) walks every scrollable ancestor, which
+   * here includes the note editor's own page - so jumping to a match would
+   * also recenter the whole note under it, jerking the page around on every
+   * Previous/Next click instead of just scrolling inside the block.
+   * Setting `scrollTop`/`scrollLeft` directly, rather than calling any
+   * scroll-into-view API, can't spill over into ancestors the way that
+   * would. */
+  private scrollCurrentMatchIntoView(cm: CodeMirrorView) {
+    const match = cm.dom.querySelector<HTMLElement>(".cm-searchMatch-selected");
+    if (!match) return;
+
+    const scroller = cm.scrollDOM;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const matchRect = match.getBoundingClientRect();
+
+    scroller.scrollTop += matchRect.top + matchRect.height / 2 - (scrollerRect.top + scrollerRect.height / 2);
+    if (matchRect.left < scrollerRect.left) {
+      scroller.scrollLeft -= scrollerRect.left - matchRect.left;
+    } else if (matchRect.right > scrollerRect.right) {
+      scroller.scrollLeft += matchRect.right - scrollerRect.right;
+    }
+
+    // This popup floats (`position: fixed`, see reposition) over the
+    // block's own top edge rather than pushing its content down, so a match
+    // centered close to that edge (a short block, or a match near the very
+    // top/bottom of the doc) can end up hidden underneath it. Scroll back up
+    // a bit more - revealing a little of the preceding lines - until it
+    // clears the popup. Re-measured after the above, not combined with it,
+    // since centering can itself be what puts the match under the popup.
+    const popupRect = this.dom.getBoundingClientRect();
+    const matchRectAfter = match.getBoundingClientRect();
+    const coveredByPopup =
+      matchRectAfter.top < popupRect.bottom &&
+      matchRectAfter.bottom > popupRect.top &&
+      matchRectAfter.left < popupRect.right &&
+      matchRectAfter.right > popupRect.left;
+    if (coveredByPopup) scroller.scrollTop -= popupRect.bottom - matchRectAfter.top + 8;
   }
 
   focus() {

@@ -3,7 +3,7 @@ import { defaultKeymap, history as codeMirrorHistory, historyKeymap, indentWithT
 import { languages as codeMirrorLanguages } from "@codemirror/language-data";
 import { bracketMatching, foldGutter, indentOnInput, indentUnit } from "@codemirror/language";
 import { search, searchKeymap } from "@codemirror/search";
-import type { Extension } from "@codemirror/state";
+import { StateEffect, type Extension } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 
@@ -18,6 +18,15 @@ export const CODE_BLOCK_DEFAULT_FONT_SIZE = 13;
  * anything until a note actually picks that language from the code block's
  * language picker. */
 export const codeBlockLanguages = codeMirrorLanguages;
+
+/** A do-nothing replacement for @codemirror/search's own `scrollToMatch`
+ * (default: `EditorView.scrollIntoView`) - that default walks *every*
+ * scrollable ancestor, not just this block's own `.cm-scroller`, so jumping
+ * to a match would also drag the note's outer page (and its scroll
+ * position) around with it. codeBlockGrips.ts's SearchPopup does its own
+ * scrolling instead, confined to the block itself - this just stops
+ * @codemirror/search from doing its (wider-reaching) version first. */
+const noOpScrollEffect = StateEffect.define<null>();
 
 /** Editor chrome for note-embedded code blocks: fixed to a VSCode-style dark
  * theme regardless of the app's own light/midnight theme, the way GitHub,
@@ -42,7 +51,11 @@ export const codeBlockExtensions: Extension[] = [
   // index.css) - because @codemirror/search only turns on match-highlight
   // decorations while a panel is mounted, and codeBlockGrips.ts's
   // `openSearchPanel()` call is what mounts it.
-  search({ top: true, createPanel: () => ({ dom: document.createElement("div") }) }),
+  search({
+    top: true,
+    createPanel: () => ({ dom: document.createElement("div") }),
+    scrollToMatch: () => noOpScrollEffect.of(null),
+  }),
   keymap.of([...closeBracketsKeymap, ...historyKeymap, ...searchKeymap, ...defaultKeymap, indentWithTab]),
   oneDark,
   EditorView.theme({
@@ -59,5 +72,17 @@ export const codeBlockExtensions: Extension[] = [
     ".cm-scroller": { lineHeight: "1.5", overflowY: "auto" },
     ".cm-content": { fontFamily: "var(--font-mono, ui-monospace, monospace)", padding: "0.85em 0" },
     ".cm-gutters": { fontFamily: "var(--font-mono, ui-monospace, monospace)" },
+    // oneDark's own `.cm-searchMatch-selected` (the current find/replace
+    // match) is a *lower*-opacity version of `.cm-searchMatch` (every other
+    // match) with the same blue hue and no outline - next to a block full of
+    // identical-looking matches, the "current" one is the least visible of
+    // the bunch rather than the most. Overridden here with a warm color that
+    // reads as distinct from the cool blue given to the rest - `!important`
+    // because oneDark's own rule has the same selector specificity and CM6
+    // doesn't guarantee this theme's StyleModule sorts after oneDark's.
+    ".cm-searchMatch.cm-searchMatch-selected": {
+      backgroundColor: "#ffb02e66 !important",
+      outline: "1px solid #ffb02e",
+    },
   }),
 ];
