@@ -16,6 +16,11 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # One at a time - running the matrix in parallel means multiple jobs can race to
+      # create the release for the same tag simultaneously, each finding no existing
+      # release and creating its own, so assets end up split across duplicates instead
+      # of landing on one shared release.
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest
