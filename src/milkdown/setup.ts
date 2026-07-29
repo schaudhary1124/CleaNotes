@@ -22,6 +22,8 @@ import { imageSchemaExt, imageWrapSidecarRemark, type ImageWrap } from "./imageS
 import { imageView } from "./imageView";
 import { getListState, type ListState } from "./listCommands";
 import { taskListToggle } from "./taskListToggle";
+import { configureVoiceNoteSchemas, voiceSidecarRemark } from "./voiceNoteSchemaExtensions";
+import { voiceNoteGrips } from "./voiceNoteGrips";
 import { noteLinkClickPlugin } from "./noteLinkClick";
 import type { NoteLinkTarget } from "./noteLinkHref";
 import { noteLinkTriggerPlugin, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "./noteLinkTrigger";
@@ -95,6 +97,7 @@ export interface EditorSelectionRange {
  * image view, and the custom flashcard/MCQ block. */
 export function registerMilkdownPlugins(
   editor: Editor,
+  notePath: string,
   onMarkdownUpdated: (markdown: string) => void,
   onSelectionStateChanged?: (state: EditorSelectionState) => void,
   onNavigateToNoteLink?: (target: NoteLinkTarget) => void,
@@ -156,6 +159,9 @@ export function registerMilkdownPlugins(
       // tableSchemaExtensionPlugins below) - see configureAlignmentSchemas's
       // own comment for why that distinction matters here.
       configureAlignmentSchemas(ctx);
+      // Layered after configureAlignmentSchemas so the two patches' sidecar comments emit in a
+      // fixed, deterministic order - see voiceNoteSchemaExtensions.ts's own comment.
+      configureVoiceNoteSchemas(ctx);
     })
     // Registered before commonmark/gfm so its handleKeyDown - which
     // intercepts plain Enter inside a table cell - runs before gfm's own
@@ -189,6 +195,11 @@ export function registerMilkdownPlugins(
     // is applied eagerly in .config() above, not here - see
     // configureAlignmentSchemas.)
     .use(alignmentSidecarRemark)
+    // Same ordering requirement as alignmentSidecarRemark, plus its own list-item-vs-sibling
+    // ordering internally - see voiceNoteSchemaExtensions.ts. (Its own paragraph/heading/
+    // list-item schema patches are applied eagerly in .config() above, not here - see
+    // configureVoiceNoteSchemas.)
+    .use(voiceSidecarRemark)
     // Overrides commonmark's `image` node schema with the `wrap` attr - safe
     // to `.use()` under the existing "image" id (see imageSchemaExt's own
     // comment for why, unlike paragraph/heading above).
@@ -209,6 +220,11 @@ export function registerMilkdownPlugins(
     .use(cursor)
     .use(imageView)
     .use(taskListToggle)
+    // The margin "add voice note"/pill affordance and its recording handling - see
+    // voiceNoteGrips.ts. Needs `notePath` (for writeAttachment when a recording is saved), which
+    // none of the other plugins here require - same reasoning imageCommands.ts's insertImageFile
+    // in Editor.tsx already closes over `notePath` for the same call.
+    .use(voiceNoteGrips(notePath))
     // The `notePin` atom node ("Copy link to this point" in the selection toolbar - see
     // notePin.ts/notePinView.ts) and its markdown round-trip. Same ordering requirement as the
     // other sidecar remarks: must come after commonmark/gfm above.

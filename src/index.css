@@ -32,6 +32,7 @@
   --danger: #b91c1c;
   --danger-soft: rgba(185, 28, 28, 0.1);
   --danger-border: rgba(185, 28, 28, 0.28);
+  --danger-solid: #f8d7d7;
   --scrollbar-thumb: rgba(0, 0, 0, 0.16);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.28);
   --selection: rgb(var(--accent-rgb) / 0.22);
@@ -67,6 +68,7 @@
   --danger: #fda4af;
   --danger-soft: rgba(251, 113, 133, 0.15);
   --danger-border: rgba(251, 113, 133, 0.35);
+  --danger-solid: #3f1d22;
   --scrollbar-thumb: rgba(255, 255, 255, 0.14);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
   --selection: rgb(var(--accent-rgb) / 0.35);
@@ -326,6 +328,139 @@ input,
 .note-link-chip:hover {
   opacity: 1;
   background-color: rgb(var(--accent-rgb) / 0.15);
+}
+
+/* Voice-note margin controls (see milkdown/voiceNoteGrips.ts) - floated just past a paragraph/
+   heading/list_item's own right edge, in .prose-note's padding gutter, never overlapping the
+   text column itself. One `.voice-line-control` exists per eligible line; its `data-state`
+   attribute switches which of the three states below is rendered inside it. */
+.voice-line-control {
+  position: absolute;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  /* A fixed reference height, not auto: the recording/error states render their content via
+     `position: absolute; top: 50%` (see .voice-line-recording/.voice-line-error below), which
+     centers against *this* box's own height - without an explicit one, an absolutely-positioned
+     child leaves this box with nothing in-flow to size itself against, collapsing it to 0 and
+     centering at the line's top edge instead of its middle. 22px matches the add/pill glyphs'
+     own size, so their (normal in-flow, unaffected by this) centering looks identical to before. */
+  height: 22px;
+}
+.voice-line-control[data-state="add"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.voice-line-control[data-state="add"].hovered {
+  opacity: 1;
+  pointer-events: auto;
+}
+.voice-line-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+  cursor: pointer;
+}
+.voice-line-add-btn:hover {
+  color: rgb(var(--accent-rgb));
+  background: rgb(var(--accent-rgb) / 0.15);
+}
+
+/* Same fixed 22px glyph footprint as .voice-line-add-btn (which this replaces once a line has a
+   voice note) - not sized to icon+duration-text content, which doesn't fit .prose-note's right
+   padding gutter without being clipped (see voiceNoteGrips.ts's renderEntry comment). Duration
+   is in the title tooltip and the popover instead. */
+.voice-line-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: rgb(var(--accent-rgb));
+  background: rgb(var(--accent-rgb) / 0.12);
+  cursor: pointer;
+}
+.voice-line-pill:hover {
+  background: rgb(var(--accent-rgb) / 0.2);
+}
+
+/* .voice-line-control is anchored (via voiceNoteGrips.ts's repositionAll) at a fixed `left` sized
+   for the small ~22px add/pill glyphs, sitting inside .prose-note's own right-padding gutter
+   (only ~48px wide - see Editor.tsx's px-12). The recording widget (dot + timer + two buttons)
+   is much wider than that gutter, so anchoring it the same way (growing rightward from that
+   `left`) pushed it past .prose-note's own edge, where its forced overflow-x (a scrolling
+   element with only overflow-y set still computes the other axis as auto, not visible - same
+   rule the note-look-paper background's own comment relies on) clipped it. `position: absolute;
+   right: 0` instead anchors its *right* edge to that same safe point and grows the box leftward,
+   back over the line's own text - an acceptable trade only while actively recording (transient,
+   one line at a time), unlike the pill/add button which must never cover the text. */
+.voice-line-recording {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  height: 22px;
+  padding: 0 0.4em;
+  border-radius: 999px;
+  background: var(--danger-solid);
+  box-shadow: var(--shadow-soft);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--danger);
+  white-space: nowrap;
+}
+.voice-line-recording-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--danger);
+  animation: voice-recording-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.voice-line-recording button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+}
+.voice-line-recording button:hover {
+  background: rgb(var(--accent-rgb) / 0.15);
+}
+
+/* Same right-anchored/grows-leftward positioning as .voice-line-recording above, and for the
+   same reason - a message like "Mic unavailable (insecure context)" is wider than the gutter
+   this control's `left` was placed for. */
+.voice-line-error {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 5;
+  padding: 0.2em 0.5em;
+  border-radius: 999px;
+  background: var(--danger-solid);
+  box-shadow: var(--shadow-soft);
+  color: var(--danger);
+  font-size: 10.5px;
+  white-space: nowrap;
 }
 
 .prose-note {

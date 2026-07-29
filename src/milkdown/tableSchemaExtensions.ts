@@ -119,7 +119,12 @@ export const tableHeaderSchemaExt = tableHeaderSchema.extendSchema((prev) => (ct
   };
 });
 
-function rowHeightAttr(node: MdastNode) {
+/** Exported for voiceNoteSchemaExtensions.ts's own tableRowSchemaExt/tableHeaderRowSchemaExt
+ * patches, which need to replicate these two runners' exact openNode/next call shape (with a
+ * voice attr merged into the same openNode) rather than delegate to them - same
+ * can't-merge-attrs-after-the-fact constraint documented at length on that file's own
+ * paragraph/heading patches. */
+export function rowHeightAttr(node: MdastNode) {
   const height = node.data?.height as number | null | undefined;
   return { height: height ?? null };
 }
@@ -127,7 +132,7 @@ function rowHeightAttr(node: MdastNode) {
 /** Row content mapping copied from gfm's own tableRowSchema/tableHeaderRowSchema
  * runners (they distribute per-column `align` onto each cell) - the only
  * addition is passing the row's own `height` attr through to `openNode`. */
-function mapRowChildren(node: MdastNode): MdastNode[] {
+export function mapRowChildren(node: MdastNode): MdastNode[] {
   const align = node.align;
   const alignArray = Array.isArray(align) ? align : undefined;
   return (node.children ?? []).map((cell, i) => ({ ...cell, align: alignArray?.[i] }));

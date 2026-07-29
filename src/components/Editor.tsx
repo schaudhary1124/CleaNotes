@@ -81,6 +81,8 @@ import { buildNoteLinkHref, describeNoteLinkTarget, parseNoteLinkHref, type Note
 import { confirmNoteLinkTrigger, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "../milkdown/noteLinkTrigger";
 import { notePinSchema } from "../milkdown/notePin";
 import { NOTE_PIN_CLICKED_EVENT, type NotePinClickedDetail } from "../milkdown/notePinView";
+import { VOICE_NOTE_CLICKED_EVENT, type VoiceNoteClickedDetail } from "../milkdown/voiceNoteGrips";
+import { VoiceNotePopover } from "./VoiceNotePopover";
 import { noteLinkChipSchema } from "../milkdown/noteLinkChip";
 import { LINK_CLICKED_EVENT, openLinkHref, type LinkClickedDetail } from "../milkdown/noteLinkClick";
 import { SketchLayer } from "./SketchLayer";
@@ -699,6 +701,9 @@ function NoteEditor({
   // Set by notePinView.ts's click handler (see the NOTE_PIN_CLICKED_EVENT listener below) -
   // which pin's popover (if any) is open.
   const [pinPopover, setPinPopover] = useState<NotePinClickedDetail | null>(null);
+  // Set by voiceNoteGrips.ts's click handler on an occupied line's pill - which voice note's
+  // popover (if any) is open. Same NodeView/PluginView -> React bridge shape as pinPopover.
+  const [voiceNotePopover, setVoiceNotePopover] = useState<VoiceNoteClickedDetail | null>(null);
   // Set by noteLinkClick.ts's/noteLinkChipView.ts's plain-click handling (see the
   // LINK_CLICKED_EVENT listener below) - which link's LinkPopover (if any) is open.
   const [linkPopover, setLinkPopover] = useState<LinkClickedDetail | null>(null);
@@ -750,6 +755,16 @@ function NoteEditor({
     return () => document.removeEventListener(NOTE_PIN_CLICKED_EVENT, onPinClicked);
   }, []);
 
+  // Bubbles up from voiceNoteGrips.ts's click handler on an occupied line's pill - same shape as
+  // onPinClicked above.
+  useEffect(() => {
+    const onVoiceNoteClicked = (event: Event) => {
+      setVoiceNotePopover((event as CustomEvent<VoiceNoteClickedDetail>).detail);
+    };
+    document.addEventListener(VOICE_NOTE_CLICKED_EVENT, onVoiceNoteClicked);
+    return () => document.removeEventListener(VOICE_NOTE_CLICKED_EVENT, onVoiceNoteClicked);
+  }, []);
+
   // Bubbles up from a plain click on either link shape - real link-marked text (noteLinkClick.ts)
   // or a pasted link-chip glyph (noteLinkChipView.ts) - both fire the same event so one popover
   // here covers both. See LinkPopover's own comment for why they share one component.
@@ -784,6 +799,7 @@ function NoteEditor({
     });
     registerMilkdownPlugins(
       editor,
+      notePath,
       handleChange,
       setSelectionState,
       onNavigateToNoteLink,
@@ -1426,6 +1442,17 @@ function NoteEditor({
           anchorRef={{ current: pinPopover.element }}
           onRemove={pinPopover.remove}
           onClose={() => setPinPopover(null)}
+        />
+      )}
+
+      {voiceNotePopover && (
+        <VoiceNotePopover
+          voiceSrc={voiceNotePopover.voiceSrc}
+          voiceDur={voiceNotePopover.voiceDur}
+          anchorRef={{ current: voiceNotePopover.element }}
+          onAppend={voiceNotePopover.startAppend}
+          onRemove={voiceNotePopover.remove}
+          onClose={() => setVoiceNotePopover(null)}
         />
       )}
 

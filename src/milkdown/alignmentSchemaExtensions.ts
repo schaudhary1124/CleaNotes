@@ -1,6 +1,7 @@
 import { headingAttr, headingIdGenerator, headingSchema, paragraphAttr, paragraphSchema } from "@milkdown/kit/preset/commonmark";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { $remark } from "@milkdown/kit/utils";
+import { findSidecarOwner } from "./sidecarComments";
 
 export type BlockAlign = "left" | "center" | "right";
 
@@ -147,17 +148,26 @@ function sidecarAlign(node: MdastNode): BlockAlign | null {
 }
 
 /** Recursively strips `<!--plainotes-align:...-->` sidecars out of the mdast
- * tree and stamps their value onto the immediately preceding paragraph/
- * heading's `data.align`, for the schemas above to pick up. Hand-rolled the
- * same way tableSchemaExtensions.ts's processChildren is, for the same
- * single-purpose-sibling-scan reason. */
+ * tree and stamps their value onto the owning paragraph/heading's
+ * `data.align`, for the schemas above to pick up. Hand-rolled the same way
+ * tableSchemaExtensions.ts's processChildren is, for the same
+ * single-purpose-sibling-scan reason.
+ *
+ * The owner isn't always the *immediate* previous sibling:
+ * voiceNoteSchemaExtensions.ts patches these same paragraph/heading schemas,
+ * and when both attrs are present its own sidecar can land between the
+ * paragraph and this one (the two patches' `toMarkdown` runners are layered,
+ * so whichever wraps the other always emits its sidecar second).
+ * findSidecarOwner skips back over any such foreign sidecar instead of
+ * assuming adjacency, so this scan doesn't depend on which patch was
+ * layered on top of the other. */
 function processAlignSidecars(children: MdastNode[] | undefined) {
   if (!children) return;
   for (let i = children.length - 1; i >= 0; i--) {
-    const prev = children[i - 1];
-    const align = i > 0 && (prev.type === "paragraph" || prev.type === "heading") ? sidecarAlign(children[i]) : null;
-    if (align) {
-      prev.data = { ...(prev.data ?? {}), align };
+    const align = sidecarAlign(children[i]);
+    const owner = align ? findSidecarOwner(children, i) : null;
+    if (align && owner && (owner.type === "paragraph" || owner.type === "heading")) {
+      owner.data = { ...(owner.data ?? {}), align };
       children.splice(i, 1);
       continue;
     }
