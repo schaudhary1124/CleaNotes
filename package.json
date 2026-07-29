@@ -23,6 +23,8 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "lucide-react": "^1.23.0",
     "mdast-util-to-markdown": "^2.1.2",
     "minisearch": "^7.2.0",

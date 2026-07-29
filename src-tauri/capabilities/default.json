@@ -19,6 +19,8 @@
     "core:event:allow-emit-to",
     "core:webview:allow-create-webview-window",
     "opener:default",
+    "updater:default",
+    "process:allow-restart",
     {
       "identifier": "fs:allow-mkdir",
       "allow": [{ "path": "$DOCUMENT/CleaNotes" }, { "path": "$DOCUMENT/CleaNotes/**" }]

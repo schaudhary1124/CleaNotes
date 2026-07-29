@@ -2,6 +2,14 @@
 
 CleaNotes is a local-first desktop note app built with Tauri, React, and TypeScript. It combines a structured notes browser, a rich Markdown editor, sketch annotations, study cards, and multi-window support in one focused workspace.
 
+## Download
+
+**[Download CleaNotes →](https://schaudhary1124.github.io/CleaNotes/)**
+
+Prebuilt installers for macOS, Windows, and Linux are published on the [Releases page](https://github.com/schaudhary1124/CleaNotes/releases/latest) and linked from the download page above. Once installed, CleaNotes checks for new releases in the background and can update itself in place — no re-downloading required.
+
+Builds aren't code-signed yet, so first launch may show an "unidentified developer" (macOS) or "unrecognized app" (Windows) warning — see the download page for how to get past it.
+
 ## What it does
 
 CleaNotes is designed for people who want one app for writing, organizing, and reviewing notes without giving up flexibility. You can create folders, nest notes, search across your content, rename and move entries with drag and drop, and open notes in separate windows when you want a wider workspace.
@@ -41,9 +49,9 @@ In study mode, flashcards and multiple-choice items are extracted from the note 
 - Milkdown
 - CodeMirror
 
-## Getting started
+## Building from source
 
-Install dependencies and run the app locally:
+For development, or if you'd rather not use the prebuilt installers above:
 
 ```bash
 npm install

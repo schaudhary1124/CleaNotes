@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CleaNotes — local-first notes for macOS, Windows, and Linux</title>
+<meta name="description" content="CleaNotes is a local-first desktop note app with a structured browser, rich Markdown editing, sketch annotations, and study mode. Download for macOS, Windows, or Linux." />
+<link rel="icon" type="image/png" href="icon.png" />
+<style>
+  :root {
+    color-scheme: light;
+    --accent-rgb: 99 102 241;
+    --app-bg: #f2f1ec;
+    --surface: rgba(255, 255, 255, 0.82);
+    --surface-strong: rgba(255, 255, 255, 0.94);
+    --border: rgba(0, 0, 0, 0.09);
+    --text-primary: #1c1c1e;
+    --text-secondary: #6e6e73;
+    --text-tertiary: #9a9a9e;
+    --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --app-bg: #0a0a10;
+      --surface: rgba(255, 255, 255, 0.045);
+      --surface-strong: rgba(255, 255, 255, 0.07);
+      --border: rgba(255, 255, 255, 0.09);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-tertiary: #64748b;
+      --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background-color: var(--app-bg);
+    background-image:
+      radial-gradient(1200px 500px at 15% -10%, rgb(var(--accent-rgb) / 0.16), transparent 60%),
+      radial-gradient(900px 500px at 100% 10%, rgb(var(--accent-rgb) / 0.1), transparent 55%);
+    background-attachment: fixed;
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; }
+
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  nav.top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 28px 0;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    font-size: 15px;
+    text-decoration: none;
+  }
+  .brand img { width: 26px; height: 26px; border-radius: 7px; display: block; }
+  .top-link {
+    font-size: 14px;
+    color: var(--text-secondary);
+    text-decoration: none;
+  }
+  .top-link:hover { color: var(--text-primary); }
+
+  .hero {
+    text-align: center;
+    padding: 56px 0 40px;
+  }
+  .hero img.icon {
+    width: 84px;
+    height: 84px;
+    border-radius: 20px;
+    box-shadow: var(--shadow-lg);
+    margin-bottom: 28px;
+  }
+  .hero h1 {
+    font-size: clamp(32px, 5vw, 48px);
+    line-height: 1.1;
+    margin: 0 0 16px;
+    letter-spacing: -0.02em;
+  }
+  .hero p.tagline {
+    font-size: 18px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-width: 560px;
+    margin: 0 auto 36px;
+  }
+
+  .primary-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: rgb(var(--accent-rgb) / 0.92);
+    color: #fff;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 16px;
+    padding: 14px 26px;
+    border-radius: 14px;
+    box-shadow: 0 12px 28px rgb(var(--accent-rgb) / 0.35);
+    transition: filter 0.15s ease, transform 0.15s ease;
+  }
+  .primary-download:hover { filter: brightness(1.08); transform: translateY(-1px); }
+  .primary-download .sub { font-weight: 400; opacity: 0.85; font-size: 13px; }
+
+  .version-note {
+    margin-top: 14px;
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+  .version-note a { color: var(--text-secondary); text-decoration: underline; }
+
+  .platform-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 22px;
+  }
+  .platform-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    border-radius: 10px;
+    text-decoration: none;
+  }
+  .platform-link:hover { color: var(--text-primary); border-color: rgb(var(--accent-rgb) / 0.4); }
+  .platform-link[data-current="true"] {
+    color: rgb(var(--accent-rgb));
+    border-color: rgb(var(--accent-rgb) / 0.5);
+    background: rgb(var(--accent-rgb) / 0.1);
+  }
+
+  .fallback-note {
+    max-width: 480px;
+    margin: 22px auto 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-tertiary);
+    display: none;
+  }
+
+  section.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 36px;
+    margin-top: 28px;
+    backdrop-filter: blur(20px);
+  }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 22px;
+  }
+  .feature h3 {
+    font-size: 15px;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .feature h3::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgb(var(--accent-rgb));
+    flex-shrink: 0;
+  }
+  .feature p {
+    margin: 0;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--text-secondary);
+  }
+
+  .updates {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+  }
+  .updates .badge {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: rgb(var(--accent-rgb) / 0.14);
+    color: rgb(var(--accent-rgb));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+  }
+  .updates h2 { font-size: 17px; margin: 4px 0 8px; }
+  .updates p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--text-secondary); }
+
+  details.all-downloads { margin-top: 16px; }
+  details.all-downloads summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+  #asset-list {
+    list-style: none;
+    padding: 0;
+    margin: 14px 0 0;
+    display: grid;
+    gap: 8px;
+  }
+  #asset-list a {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--surface-strong);
+    border: 1px solid var(--border);
+    text-decoration: none;
+  }
+  #asset-list a:hover { border-color: rgb(var(--accent-rgb) / 0.4); }
+  #asset-list .size { color: var(--text-tertiary); }
+
+  footer {
+    text-align: center;
+    margin-top: 48px;
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+  footer a { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <nav class="top">
+    <a class="brand" href="./">
+      <img src="icon.png" alt="" />
+      CleaNotes
+    </a>
+    <a class="top-link" href="https://github.com/schaudhary1124/CleaNotes" target="_blank" rel="noopener">
+      Source on GitHub ↗
+    </a>
+  </nav>
+
+  <div class="hero">
+    <img class="icon" src="icon.png" alt="CleaNotes icon" />
+    <h1>One focused workspace for writing, organizing, and reviewing notes.</h1>
+    <p class="tagline">
+      CleaNotes is a local-first desktop note app: a structured notes browser, a rich Markdown
+      editor, sketch annotations, and study cards, in one app. Your notes stay on your device.
+    </p>
+
+    <a id="primary-download" class="primary-download" href="https://github.com/schaudhary1124/CleaNotes/releases/latest">
+      <span id="primary-download-label">Download for your device</span>
+    </a>
+    <div class="version-note" id="version-note"></div>
+
+    <div class="platform-row" id="platform-row"></div>
+    <p class="fallback-note" id="fallback-note">
+      No published build yet — check back soon, or
+      <a href="https://github.com/schaudhary1124/CleaNotes">build it from source</a> in the meantime.
+    </p>
+  </div>
+
+  <section class="card">
+    <div class="features">
+      <div class="feature">
+        <h3>Folder-based organization</h3>
+        <p>Nest notes in folders, rename and move entries with drag and drop, and keep everything structured your way.</p>
+      </div>
+      <div class="feature">
+        <h3>Rich Markdown editing</h3>
+        <p>A full formatting toolbar built on Milkdown, with support for tables, code blocks, and more.</p>
+      </div>
+      <div class="feature">
+        <h3>Sketch mode</h3>
+        <p>Draw and annotate directly on a note, alongside your written content.</p>
+      </div>
+      <div class="feature">
+        <h3>Study mode</h3>
+        <p>Turn compatible Markdown lines into flashcards or multiple-choice questions for quick review.</p>
+      </div>
+      <div class="feature">
+        <h3>Multi-window support</h3>
+        <p>Duplicate a note into its own window, with autosave keeping every window in sync.</p>
+      </div>
+      <div class="feature">
+        <h3>Global search</h3>
+        <p>Search across every note instantly, with customizable theme, accent, and layout to match your taste.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card updates">
+    <div class="badge">↻</div>
+    <div>
+      <h2>Always up to date</h2>
+      <p>
+        CleaNotes checks for new releases in the background and can install them without a
+        re-download — just review the changes and restart when you're ready. New releases
+        are always available here too.
+      </p>
+      <details class="all-downloads">
+        <summary>See all downloads for the latest release</summary>
+        <ul id="asset-list"></ul>
+      </details>
+    </div>
+  </section>
+
+  <footer>
+    Unsigned builds: macOS may warn the app is from an unidentified developer, and Windows
+    SmartScreen may warn it's unrecognized — this is expected for a project not yet enrolled in a
+    paid developer/signing program. macOS: right-click the app → Open. Windows: “More info” → “Run anyway”.
+    <br /><br />
+    <a href="https://github.com/schaudhary1124/CleaNotes/releases">All releases</a> ·
+    <a href="https://github.com/schaudhary1124/CleaNotes">GitHub repository</a>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var REPO = "schaudhary1124/CleaNotes";
+
+  var ASSET_KINDS = [
+    { id: "mac", label: "macOS (.dmg)", test: function (n) { return /\.dmg$/i.test(n); } },
+    { id: "win-msi", label: "Windows (.msi)", test: function (n) { return /\.msi$/i.test(n); } },
+    { id: "win-exe", label: "Windows (.exe)", test: function (n) { return /setup\.exe$/i.test(n); } },
+    { id: "linux-appimage", label: "Linux (.AppImage)", test: function (n) { return /\.appimage$/i.test(n); } },
+    { id: "linux-deb", label: "Linux (.deb)", test: function (n) { return /\.deb$/i.test(n); } },
+    { id: "linux-rpm", label: "Linux (.rpm)", test: function (n) { return /\.rpm$/i.test(n); } },
+  ];
+
+  function isHumanAsset(name) {
+    if (/\.sig$/i.test(name)) return false;
+    if (/^latest\.json$/i.test(name)) return false;
+    return true;
+  }
+
+  function detectPlatformId() {
+    var ua = navigator.userAgent || "";
+    if (/Mac OS X|Macintosh/.test(ua)) return "mac";
+    if (/Windows/.test(ua)) return "win-msi";
+    if (/Linux/.test(ua) && !/Android/.test(ua)) return "linux-appimage";
+    return null;
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes && bytes !== 0) return "";
+    var units = ["B", "KB", "MB", "GB"];
+    var i = 0;
+    var n = bytes;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + " " + units[i];
+  }
+
+  function kindForAsset(name) {
+    for (var i = 0; i < ASSET_KINDS.length; i++) {
+      if (ASSET_KINDS[i].test(name)) return ASSET_KINDS[i];
+    }
+    return null;
+  }
+
+  function render(release) {
+    var assets = (release.assets || []).filter(function (a) { return isHumanAsset(a.name); });
+    var versionNote = document.getElementById("version-note");
+    versionNote.innerHTML =
+      (release.tag_name || "latest") +
+      ' &middot; <a href="' + release.html_url + '" target="_blank" rel="noopener">release notes</a>';
+
+    var matches = {};
+    assets.forEach(function (asset) {
+      var kind = kindForAsset(asset.name);
+      if (kind && !matches[kind.id]) matches[kind.id] = asset;
+    });
+
+    var platformRow = document.getElementById("platform-row");
+    var currentId = detectPlatformId();
+    ASSET_KINDS.forEach(function (kind) {
+      var asset = matches[kind.id];
+      if (!asset) return;
+      var a = document.createElement("a");
+      a.className = "platform-link";
+      a.href = asset.browser_download_url;
+      a.textContent = kind.label;
+      if (kind.id === currentId) a.dataset.current = "true";
+      platformRow.appendChild(a);
+    });
+
+    var primary = document.getElementById("primary-download");
+    var primaryLabel = document.getElementById("primary-download-label");
+    var primaryAsset = (currentId && matches[currentId]) || assets[0];
+    if (primaryAsset) {
+      primary.href = primaryAsset.browser_download_url;
+      var kind = kindForAsset(primaryAsset.name);
+      primaryLabel.textContent = "Download for " + (kind ? kind.label.replace(/\s*\(.*\)/, "") : "your device");
+    } else {
+      document.getElementById("fallback-note").style.display = "block";
+      primary.href = release.html_url || "https://github.com/" + REPO + "/releases";
+      primaryLabel.textContent = "View releases";
+    }
+
+    var list = document.getElementById("asset-list");
+    assets.forEach(function (asset) {
+      var li = document.createElement("li");
+      var a = document.createElement("a");
+      a.href = asset.browser_download_url;
+      var nameSpan = document.createElement("span");
+      nameSpan.textContent = asset.name;
+      var sizeSpan = document.createElement("span");
+      sizeSpan.className = "size";
+      sizeSpan.textContent = formatBytes(asset.size);
+      a.appendChild(nameSpan);
+      a.appendChild(sizeSpan);
+      li.appendChild(a);
+      list.appendChild(li);
+    });
+    if (assets.length === 0) {
+      var li = document.createElement("li");
+      li.textContent = "No downloadable assets on this release yet.";
+      list.appendChild(li);
+    }
+  }
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest")
+    .then(function (res) {
+      if (!res.ok) throw new Error("No published release yet");
+      return res.json();
+    })
+    .then(render)
+    .catch(function () {
+      document.getElementById("fallback-note").style.display = "block";
+      document.getElementById("version-note").textContent = "";
+    });
+})();
+</script>
+</body>
+</html>

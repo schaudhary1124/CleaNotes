@@ -12,6 +12,7 @@ import { NewItemDialog } from "./components/NewItemDialog";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { TabStrip } from "./components/TabStrip";
+import { useAppUpdater } from "./hooks/useAppUpdater";
 import {
   createFolder,
   createNote,
@@ -140,6 +141,10 @@ function App() {
   const [newItemDialog, setNewItemDialog] = useState<NewItemDialogState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [showRestartConfirm, setShowRestartConfirm] = useState(false);
+
+  // Update checks/prompts only make sense once, from the main window - see isMainWindow above.
+  const { state: updaterState, installUpdate, restartNow } = useAppUpdater(isMainWindow);
 
   const toolbarVisible = !settings.toolbarCollapsed;
   const handleToggleToolbar = () => setSettings((s) => ({ ...s, toolbarCollapsed: !s.toolbarCollapsed }));
@@ -1026,6 +1031,55 @@ function App() {
           <div className="glass-surface shadow-app-lg animate-fade-in absolute bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl px-4 py-2.5 text-sm">
             <span className="text-primary">{toast}</span>
           </div>
+        )}
+
+        {updaterState.phase !== "idle" && updaterState.phase !== "checking" && (
+          <div className="glass-surface shadow-app-lg animate-fade-in absolute bottom-6 right-6 z-50 flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm">
+            <span className="text-primary">
+              {updaterState.phase === "available" && `Update available — v${updaterState.version}`}
+              {updaterState.phase === "downloading" && "Downloading update…"}
+              {updaterState.phase === "ready" && "Update ready to install"}
+              {updaterState.phase === "error" && "Couldn't install update"}
+            </span>
+            {updaterState.phase === "available" && (
+              <button
+                type="button"
+                onClick={() => void installUpdate()}
+                className="bg-accent-solid h-7 shrink-0 rounded-lg px-3 text-xs font-medium text-white transition-colors duration-150 hover:brightness-110"
+              >
+                Install
+              </button>
+            )}
+            {updaterState.phase === "ready" && (
+              <button
+                type="button"
+                onClick={() => setShowRestartConfirm(true)}
+                className="bg-accent-solid h-7 shrink-0 rounded-lg px-3 text-xs font-medium text-white transition-colors duration-150 hover:brightness-110"
+              >
+                Restart Now
+              </button>
+            )}
+            {updaterState.phase === "error" && (
+              <button
+                type="button"
+                onClick={() => void installUpdate()}
+                className="btn-ghost h-7 shrink-0 rounded-lg px-3 text-xs"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+
+        {showRestartConfirm && (
+          <ConfirmDialog
+            title="Restart to finish updating?"
+            description="Your notes are saved automatically, so it's safe to restart now."
+            confirmLabel="Restart Now"
+            danger={false}
+            onConfirm={restartNow}
+            onCancel={() => setShowRestartConfirm(false)}
+          />
         )}
       </div>
     </div>

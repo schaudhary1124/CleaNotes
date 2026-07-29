@@ -3,6 +3,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Updater isn't relevant/available on mobile targets.
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            Ok(())
+        })
         // WebKitGTK (Linux) has no native permission-prompt UI for getUserMedia (voice-note
         // recording, see src/milkdown/voiceRecording.ts) the way macOS's TCC dialog
         // (NSMicrophoneUsageDescription in Info.plist) and WebView2's own popup do - an
