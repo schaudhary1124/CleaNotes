@@ -127,7 +127,7 @@ interface DragSession {
  * live window-follow during the drag - a webview can't render outside its own OS window
  * bounds anyway, so trying to animate a real window under the cursor for the whole gesture
  * added a lot of failure modes for no functional benefit): dropping back on this strip is a
- * no-op, dropping on a *different* PlaiNotes window's tab strip merges into it, and dropping
+ * no-op, dropping on a *different* CleaNotes window's tab strip merges into it, and dropping
  * anywhere else opens the note in a new standalone window at the drop point.
  */
 export function TabStrip({

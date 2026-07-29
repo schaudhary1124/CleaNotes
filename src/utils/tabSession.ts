@@ -5,7 +5,10 @@
  * (duplicated or detached) are ephemeral and never restored on relaunch, so
  * only "main" needs to read/write this.
  */
-const KEY = "plainotes:tabs:main";
+const KEY = "cleanotes:tabs:main";
+// Pre-rename key (app was called PlaiNotes through v0.1.0) - read as a fallback
+// in loadMainTabSession so an in-progress session survives the rename.
+const LEGACY_KEY = "plainotes:tabs:main";
 
 interface MainTabSession {
   tabs: string[];
@@ -14,7 +17,7 @@ interface MainTabSession {
 
 export function loadMainTabSession(): MainTabSession | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(KEY) ?? localStorage.getItem(LEGACY_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed.tabs)) return null;

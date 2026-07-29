@@ -1,6 +1,9 @@
 import type { AppSettings } from "../types";
 
-const STORAGE_KEY = "plainotes:settings";
+const STORAGE_KEY = "cleanotes:settings";
+// Pre-rename key (app was called PlaiNotes through v0.1.0) - read as a fallback
+// in loadSettings so existing settings survive the rename, never written to again.
+const LEGACY_STORAGE_KEY = "plainotes:settings";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "light",
@@ -12,7 +15,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 export function loadSettings(): AppSettings {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
   } catch {

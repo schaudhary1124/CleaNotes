@@ -14,10 +14,13 @@ import {
 import { extractStudyItemsAndStrip } from "./markdownParser";
 import type { FolderEntry, NoteEntry, NoteLook, NoteSummary, SketchData, StudyItem, TreeEntry } from "../types";
 
-/** Notes live under the user's OS Documents folder, e.g. ~/Documents/PlaiNotes */
-export const NOTES_DIR = "PlaiNotes";
+/** Notes live under the user's OS Documents folder, e.g. ~/Documents/CleaNotes */
+export const NOTES_DIR = "CleaNotes";
+// Pre-rename folder name (the app was called PlaiNotes through v0.1.0) - see
+// migrateLegacyNotesDir, the only place this should ever be referenced.
+const LEGACY_NOTES_DIR = "PlaiNotes";
 const NOTE_EXTENSION = ".md";
-// No leading dot: Tauri's fs scope glob matching (`PlaiNotes/**`) doesn't match dotfiles,
+// No leading dot: Tauri's fs scope glob matching (`CleaNotes/**`) doesn't match dotfiles,
 // which would silently block reads/writes under this folder. Hidden from the notes tree
 // via an explicit name check in buildTree instead.
 const ASSETS_DIR = "assets";
@@ -26,21 +29,26 @@ const ASSETS_DIR = "assets";
 // items with the same name/path can never collide inside trash - see trashName below.
 const TRASH_DIR = "trash";
 // Sibling file next to the note (not a dot-directory): Tauri's fs scope glob matching
-// (`PlaiNotes/**`) doesn't match dotfiles, which would silently block reads/writes -
+// (`CleaNotes/**`) doesn't match dotfiles, which would silently block reads/writes -
 // see the META_FILE note below. A same-folder sidecar with a non-".md" extension is
 // already invisible to buildTree without needing a leading dot.
 const SKETCH_EXTENSION = ".sketch.json";
 // Sidecar file next to the note holding its flashcards/MCQs, kept fully
 // separate from the note's Markdown content/editor - see StudyView.tsx.
 const STUDY_EXTENSION = ".study.json";
-// No leading dot: Tauri's fs scope glob matching (`PlaiNotes/**`) doesn't match dotfiles,
+// No leading dot: Tauri's fs scope glob matching (`CleaNotes/**`) doesn't match dotfiles,
 // which would silently block reads/writes of this file.
-const META_FILE = "plainotes-meta.json";
+const META_FILE = "cleanotes-meta.json";
 // No leading dot, same reasoning as META_FILE above. This is a cache the search
 // index rebuilds from if missing or unreadable, so it's fine to skip it silently.
-const SEARCH_INDEX_FILE = "plainotes-search-index.json";
+const SEARCH_INDEX_FILE = "cleanotes-search-index.json";
 // No leading dot, same reasoning as SEARCH_INDEX_FILE above - also just a rebuildable cache.
-const BACKLINKS_INDEX_FILE = "plainotes-backlinks-index.json";
+const BACKLINKS_INDEX_FILE = "cleanotes-backlinks-index.json";
+// Old (plainotes-prefixed) names for the three files above, pre-rename - see
+// migrateLegacyNotesDir, the only place these should ever be referenced.
+const LEGACY_META_FILE = "plainotes-meta.json";
+const LEGACY_SEARCH_INDEX_FILE = "plainotes-search-index.json";
+const LEGACY_BACKLINKS_INDEX_FILE = "plainotes-backlinks-index.json";
 const BASE_DIR = BaseDirectory.Document;
 
 export const STARTER_CONTENT = "";
@@ -258,8 +266,40 @@ function studyPathFor(notePath: string): string {
   return notePath.slice(0, -NOTE_EXTENSION.length) + STUDY_EXTENSION;
 }
 
-/** Creates the PlaiNotes folder in Documents on first run, if it doesn't exist yet. */
+/**
+ * One-time migration from the app's pre-rename layout: if a legacy PlaiNotes folder exists
+ * and CleaNotes doesn't yet, renames the whole folder in place (a single directory rename -
+ * every note, sketch, study sidecar, and attachment moves for free, exactly like a
+ * deleteFolder/moveEntry rename already does for a subtree), then renames its three internal
+ * index files off their old plainotes- prefixed names. Safe to call on every launch: both
+ * exists() checks make it a no-op once migrated, or for anyone who never had a PlaiNotes
+ * folder to begin with.
+ */
+async function migrateLegacyNotesDir(): Promise<void> {
+  const alreadyMigrated = await exists(NOTES_DIR, { baseDir: BASE_DIR });
+  if (alreadyMigrated) return;
+  const hasLegacyDir = await exists(LEGACY_NOTES_DIR, { baseDir: BASE_DIR });
+  if (!hasLegacyDir) return;
+
+  await rename(LEGACY_NOTES_DIR, NOTES_DIR, { oldPathBaseDir: BASE_DIR, newPathBaseDir: BASE_DIR });
+
+  const legacyFileRenames: [string, string][] = [
+    [LEGACY_META_FILE, META_FILE],
+    [LEGACY_SEARCH_INDEX_FILE, SEARCH_INDEX_FILE],
+    [LEGACY_BACKLINKS_INDEX_FILE, BACKLINKS_INDEX_FILE],
+  ];
+  for (const [legacyName, newName] of legacyFileRenames) {
+    const legacyPath = fullPath(legacyName);
+    if (await exists(legacyPath, { baseDir: BASE_DIR })) {
+      await rename(legacyPath, fullPath(newName), { oldPathBaseDir: BASE_DIR, newPathBaseDir: BASE_DIR });
+    }
+  }
+}
+
+/** Creates the CleaNotes folder in Documents on first run, if it doesn't exist yet
+ * (after first giving migrateLegacyNotesDir a chance to just rename a pre-existing one). */
 export async function ensureNotesDir(): Promise<void> {
+  await migrateLegacyNotesDir();
   const dirExists = await exists(NOTES_DIR, { baseDir: BASE_DIR });
   if (!dirExists) {
     await mkdir(NOTES_DIR, { baseDir: BASE_DIR, recursive: true });

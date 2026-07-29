@@ -466,6 +466,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cleanotes"
+version = "0.1.0"
+dependencies = [
+ "glib",
+ "gtk",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-fs",
+ "tauri-plugin-opener",
+ "webkit2gtk",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2428,21 +2443,6 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
-
-[[package]]
-name = "plainotes"
-version = "0.1.0"
-dependencies = [
- "glib",
- "gtk",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-fs",
- "tauri-plugin-opener",
- "webkit2gtk",
-]
 
 [[package]]
 name = "plist"

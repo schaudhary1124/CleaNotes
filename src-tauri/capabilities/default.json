@@ -21,43 +21,51 @@
     "opener:default",
     {
       "identifier": "fs:allow-mkdir",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes" }, { "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes" }, { "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes" }, { "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [
+        { "path": "$DOCUMENT/CleaNotes" },
+        { "path": "$DOCUMENT/CleaNotes/**" },
+        { "path": "$DOCUMENT/PlaiNotes" }
+      ]
     },
     {
       "identifier": "fs:allow-read-dir",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes" }, { "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes" }, { "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-stat",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes" }, { "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes" }, { "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-read-file",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-write-file",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes/**" }]
     },
     {
       "identifier": "fs:allow-rename",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [
+        { "path": "$DOCUMENT/CleaNotes" },
+        { "path": "$DOCUMENT/CleaNotes/**" },
+        { "path": "$DOCUMENT/PlaiNotes" }
+      ]
     },
     {
       "identifier": "fs:allow-remove",
-      "allow": [{ "path": "$DOCUMENT/PlaiNotes/**" }]
+      "allow": [{ "path": "$DOCUMENT/CleaNotes/**" }]
     }
   ]
 }

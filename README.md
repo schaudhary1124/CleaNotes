@@ -1,12 +1,12 @@
-# PlaiNotes
+# CleaNotes
 
-PlaiNotes is a local-first desktop note app built with Tauri, React, and TypeScript. It combines a structured notes browser, a rich Markdown editor, sketch annotations, study cards, and multi-window support in one focused workspace.
+CleaNotes is a local-first desktop note app built with Tauri, React, and TypeScript. It combines a structured notes browser, a rich Markdown editor, sketch annotations, study cards, and multi-window support in one focused workspace.
 
 ## What it does
 
-PlaiNotes is designed for people who want one app for writing, organizing, and reviewing notes without giving up flexibility. You can create folders, nest notes, search across your content, rename and move entries with drag and drop, and open notes in separate windows when you want a wider workspace.
+CleaNotes is designed for people who want one app for writing, organizing, and reviewing notes without giving up flexibility. You can create folders, nest notes, search across your content, rename and move entries with drag and drop, and open notes in separate windows when you want a wider workspace.
 
-The editor supports rich formatting through Milkdown, along with note-level sketching and annotations. Notes can also switch into study mode, where PlaiNotes turns compatible Markdown lines into flashcards or multiple-choice questions for quick review.
+The editor supports rich formatting through Milkdown, along with note-level sketching and annotations. Notes can also switch into study mode, where CleaNotes turns compatible Markdown lines into flashcards or multiple-choice questions for quick review.
 
 ## Key features
 
@@ -23,7 +23,7 @@ The editor supports rich formatting through Milkdown, along with note-level sket
 
 ## Study syntax
 
-PlaiNotes recognizes simple study-item lines inside Markdown notes:
+CleaNotes recognizes simple study-item lines inside Markdown notes:
 
 ```md
 Q: What is the capital of France? -> A: Paris

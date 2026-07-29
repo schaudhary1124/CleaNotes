@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    plainotes_lib::run()
+    cleanotes_lib::run()
 }

@@ -40,7 +40,7 @@ pub fn run() {
                                     gtk::DialogFlags::MODAL,
                                     gtk::MessageType::Question,
                                     gtk::ButtonsType::YesNo,
-                                    "PlaiNotes wants to use your microphone to record a voice note.",
+                                    "CleaNotes wants to use your microphone to record a voice note.",
                                 );
                                 dialog.set_title("Microphone access");
                                 let response = dialog.run();

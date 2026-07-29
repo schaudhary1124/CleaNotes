@@ -42,7 +42,7 @@ async function logicalSizeOfCurrentWindow(): Promise<{ width: number; height: nu
 }
 
 /**
- * Opens a new PlaiNotes window, sized to match the current window - straight into a specific
+ * Opens a new CleaNotes window, sized to match the current window - straight into a specific
  * note if given one, or to Home otherwise (mirrors how the main window itself boots).
  */
 export async function openWindowInstance(target?: { notePath: string }): Promise<void> {
@@ -53,7 +53,7 @@ export async function openWindowInstance(target?: { notePath: string }): Promise
   const label = `note-${crypto.randomUUID()}`;
   new WebviewWindow(label, {
     url: `index.html${query}`,
-    title: "PlaiNotes",
+    title: "CleaNotes",
     width,
     height,
     minWidth: 370,
@@ -68,7 +68,7 @@ export async function openWindowInstance(target?: { notePath: string }): Promise
 }
 
 /** Event a detached window listens for right after creation - see createDetachedWindow. */
-export const DETACH_INIT_EVENT = "plainotes://tab-detach-init";
+export const DETACH_INIT_EVENT = "cleanotes://tab-detach-init";
 
 export interface DetachInitPayload {
   path: string;
@@ -77,12 +77,12 @@ export interface DetachInitPayload {
 
 /** Sent directly from a window whose tab-drag resolved into a merge to the window under the
  * drop point, carrying the note's latest content - see TabStrip.tsx's finishDragOut. */
-export const MERGE_TAB_EVENT = "plainotes://tab-merge-handoff";
+export const MERGE_TAB_EVENT = "cleanotes://tab-merge-handoff";
 
 export type MergeTabPayload = DetachInitPayload;
 
 /**
- * Opens a PlaiNotes window for a tab that just got dragged out and dropped somewhere with no
+ * Opens a CleaNotes window for a tab that just got dragged out and dropped somewhere with no
  * matching tab strip under it, positioned at the drop point. `content` is handed to the new
  * window directly over an event rather than left for it to read off disk, so an in-flight,
  * not-yet-autosaved edit isn't lost to a race (see App.tsx's caller, which always resolves
@@ -107,7 +107,7 @@ export async function createDetachedWindow(
   const label = `note-${crypto.randomUUID()}`;
   const webview = new WebviewWindow(label, {
     url: `index.html?${query}`,
-    title: "PlaiNotes",
+    title: "CleaNotes",
     x: position.x,
     y: position.y,
     width,

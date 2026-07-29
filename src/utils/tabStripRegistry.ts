@@ -2,7 +2,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
- * Lets every PlaiNotes window know where every other window's tab strip
+ * Lets every CleaNotes window know where every other window's tab strip
  * currently sits on screen, so a tab being dragged out of one window can be
  * dropped onto a different window's tab strip to merge into it (see
  * TabStrip.tsx's finishDetach). Each window broadcasts its own rect (or
@@ -10,9 +10,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  * and, since a window can open *after* others already broadcast, a mounting
  * strip also sends a catch-up request that every other live strip answers.
  */
-const TABSTRIP_RECT_EVENT = "plainotes://tabstrip-rect";
-const TABSTRIP_RECT_REMOVE_EVENT = "plainotes://tabstrip-rect-removed";
-const TABSTRIP_RECT_REQUEST_EVENT = "plainotes://tabstrip-rect-request";
+const TABSTRIP_RECT_EVENT = "cleanotes://tabstrip-rect";
+const TABSTRIP_RECT_REMOVE_EVENT = "cleanotes://tabstrip-rect-removed";
+const TABSTRIP_RECT_REQUEST_EVENT = "cleanotes://tabstrip-rect-request";
 
 export interface ScreenRect {
   x: number;
