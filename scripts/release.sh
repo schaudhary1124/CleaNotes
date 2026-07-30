@@ -90,17 +90,24 @@ fi
 info "Pushing main..."
 git push origin main
 
+# Captured before the push so a run that GitHub timestamps slightly earlier than our
+# local clock (network latency) is never mistakenly filtered out below.
+TAG_PUSH_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 git tag -a "$TAG" -m "CleaNotes $TAG"
 info "Pushing tag $TAG (this triggers the build)..."
 git push origin "$TAG"
 
 # --- find and watch the triggered workflow run ------------------------------
+# A retagged/retried version reuses the same tag name, so old runs for it stick around
+# in the history - filter to runs created at or after this push, and take the newest
+# match (highest databaseId), so a stale completed run is never picked up by mistake.
 info "Waiting for GitHub Actions to register the build..."
 RUN_ID=""
 for _ in $(seq 1 20); do
   RUN_ID="$(gh run list --repo "$REPO" --workflow=release.yml \
-    --json databaseId,headBranch,event -q \
-    ".[] | select(.headBranch == \"$TAG\" and .event == \"push\") | .databaseId" | head -n1)"
+    --json databaseId,headBranch,event,createdAt -q \
+    ".[] | select(.headBranch == \"$TAG\" and .event == \"push\" and .createdAt >= \"$TAG_PUSH_TIME\") | .databaseId" \
+    | sort -rn | head -n1)"
   [ -n "$RUN_ID" ] && break
   sleep 3
 done
