@@ -4,10 +4,12 @@ import {
   Calendar,
   Check,
   Code,
+  Download,
   GraduationCap,
   Mic,
   Pin,
   RefreshCw,
+  RotateCcw,
   Brush,
 } from "lucide-react";
 import type { AppSettings, FeatureFlags, ThemeName } from "../types";
@@ -20,6 +22,8 @@ interface SettingsPanelProps {
   onClose: () => void;
   updaterState: AppUpdaterState;
   onCheckForUpdates: () => void;
+  onInstallUpdate: () => void;
+  onRestart: () => void;
 }
 
 const THEMES: { value: ThemeName; label: string }[] = [
@@ -45,7 +49,15 @@ const FEATURES: { key: keyof FeatureFlags; label: string; description: string; i
   { key: "voiceNotes", label: "Voice Notes", description: "Record audio notes inline", icon: Mic },
 ];
 
-export function SettingsPanel({ settings, onChange, onClose, updaterState, onCheckForUpdates }: SettingsPanelProps) {
+export function SettingsPanel({
+  settings,
+  onChange,
+  onClose,
+  updaterState,
+  onCheckForUpdates,
+  onInstallUpdate,
+  onRestart,
+}: SettingsPanelProps) {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   // Set the moment a manual check is kicked off, so once the phase settles back to "idle" we
   // know that was in response to this check (rather than just the hook's initial idle state) and
@@ -80,6 +92,29 @@ export function SettingsPanel({ settings, onChange, onClose, updaterState, onChe
   function toggleFeature(key: keyof FeatureFlags) {
     onChange({ ...settings, features: { ...settings.features, [key]: !settings.features[key] } });
   }
+
+  // The button drives whatever action the current phase calls for, rather than only ever
+  // re-checking - so the user explicitly opts in to each step (download, then restart).
+  const updateButton = (() => {
+    switch (updaterState.phase) {
+      case "checking":
+        return { label: "Checking…", icon: RefreshCw, spin: true, disabled: true, onClick: onCheckForUpdates };
+      case "available":
+        return {
+          label: `Update to v${updaterState.version}`,
+          icon: Download,
+          spin: false,
+          disabled: false,
+          onClick: onInstallUpdate,
+        };
+      case "downloading":
+        return { label: "Downloading…", icon: Download, spin: true, disabled: true, onClick: onInstallUpdate };
+      case "ready":
+        return { label: "Restart Application", icon: RotateCcw, spin: false, disabled: false, onClick: onRestart };
+      default:
+        return { label: "Check for Updates", icon: RefreshCw, spin: false, disabled: false, onClick: onCheckForUpdates };
+    }
+  })();
 
   return (
     <div className="glass-panel shadow-app animate-fade-in relative flex-1 overflow-y-auto">
@@ -185,12 +220,12 @@ export function SettingsPanel({ settings, onChange, onClose, updaterState, onChe
               </div>
               <button
                 type="button"
-                onClick={onCheckForUpdates}
-                disabled={updaterState.phase === "checking" || updaterState.phase === "downloading"}
+                onClick={updateButton.onClick}
+                disabled={updateButton.disabled}
                 className="btn-ghost border-subtle flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <RefreshCw size={13} className={updaterState.phase === "checking" ? "animate-spin" : ""} />
-                {updaterState.phase === "checking" ? "Checking…" : "Check for Updates"}
+                <updateButton.icon size={13} className={updateButton.spin ? "animate-spin" : ""} />
+                {updateButton.label}
               </button>
             </div>
           </section>

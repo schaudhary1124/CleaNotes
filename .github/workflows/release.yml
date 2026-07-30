@@ -34,6 +34,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: verify tag matches app version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          CONF_VERSION="v$(jq -r .version src-tauri/tauri.conf.json)"
+          if [ "$TAG" != "$CONF_VERSION" ]; then
+            echo "::error::Tag $TAG does not match src-tauri/tauri.conf.json version ($CONF_VERSION) - bump the version before tagging (see scripts/release.sh)."
+            exit 1
+          fi
+
       - name: install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |

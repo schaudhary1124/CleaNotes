@@ -905,6 +905,8 @@ function App() {
               onClose={() => setSettingsOpen(false)}
               updaterState={updaterState}
               onCheckForUpdates={checkNow}
+              onInstallUpdate={() => void installUpdate()}
+              onRestart={() => setShowRestartConfirm(true)}
             />
           ) : (
             <>

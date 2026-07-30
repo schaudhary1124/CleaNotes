@@ -64,6 +64,26 @@ To build the app:
 npm run build
 ```
 
+## Releasing
+
+`scripts/release.sh` (or `npm run release`) cuts a full release in one shot: it bumps the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, commits and pushes to `main`, pushes a matching `vX.Y.Z` tag to kick off the GitHub Actions build for macOS/Windows/Linux, watches the build to completion, and publishes the resulting GitHub release. Installed copies of CleaNotes and the [download page](https://schaudhary1124.github.io/CleaNotes/) both pick up published releases automatically - nothing else to update by hand.
+
+One-time setup:
+
+```bash
+brew install gh
+gh auth login
+```
+
+To release, from a clean `main` that's already pushed with everything you want to ship:
+
+```bash
+npm run release            # prompts for the new version
+npm run release 0.3.0      # or pass it directly
+```
+
+The script refuses to run with a dirty working tree, on a branch other than `main`, or if `main` is behind `origin/main` - fix those first. It asks for confirmation once (showing the version-bump diff) before pushing or tagging anything.
+
 ## Recommended IDE setup
 
 - [VS Code](https://code.visualstudio.com/) with [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) and [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
