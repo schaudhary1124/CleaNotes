@@ -18,7 +18,7 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
     <div
       role="tablist"
       aria-label="Toggle between Edit and Study mode"
-      className="glass-surface relative flex h-8 w-36 shrink-0 items-center overflow-hidden rounded-full border-0 p-1 text-xs font-medium @max-sm:w-16"
+      className="glass-surface relative flex h-8 w-36 shrink-0 items-center overflow-hidden rounded-full border-0 p-1 text-xs font-medium @max-lg:w-16"
     >
       <span
         className="bg-accent-solid shadow-app absolute top-1 bottom-1 left-1 w-[calc(50%-4px)] rounded-full transition-transform duration-200 ease-out"
@@ -37,7 +37,7 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
           }`}
         >
           <m.icon size={12} className="shrink-0" />
-          <span className="@max-sm:hidden">{m.label}</span>
+          <span className="@max-lg:hidden">{m.label}</span>
         </button>
       ))}
     </div>

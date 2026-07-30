@@ -84,12 +84,29 @@ export type BackgroundStyle = "flat" | "soft" | "glass";
  * `noteLooks` meta entry for persistence. */
 export type NoteLook = "plain" | "paper" | "grid" | "index-card";
 
+/** Per-feature on/off switches - see SettingsPanel.tsx's "Features" section. Disabling a
+ * feature hides the ways to create/reach it elsewhere in the app; it never touches content a
+ * note already has (e.g. disabling codeBlock still lets existing code blocks render/edit). */
+export interface FeatureFlags {
+  calendar: boolean;
+  sketch: boolean;
+  studyMode: boolean;
+  codeBlock: boolean;
+  keepOnTop: boolean;
+  voiceNotes: boolean;
+}
+
 export interface AppSettings {
   theme: ThemeName;
   accent: string;
   background: BackgroundStyle;
   toolbarCollapsed: boolean;
   sidebarCollapsed: boolean;
+  /** Whether this window is pinned above other windows - see Header.tsx's Pin button, which
+   * both reads and toggles this (lifted out of Header's own local state so it's also settable/
+   * persisted from Settings). */
+  alwaysOnTop: boolean;
+  features: FeatureFlags;
 }
 
 export type SketchTool = "pen" | "highlighter" | "eraser";

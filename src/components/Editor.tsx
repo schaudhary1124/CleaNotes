@@ -102,6 +102,14 @@ interface EditorProps {
   toolbarVisible: boolean;
   sketchMode: boolean;
   onToggleSketchMode: () => void;
+  /** Whether the Sketch feature is enabled - hides the toolbar's sketch toggle when off. */
+  sketchEnabled: boolean;
+  /** Whether the Code Block feature is enabled - hides the toolbar's insert button when off.
+   * Existing code blocks in the note still render/edit regardless. */
+  codeBlockEnabled: boolean;
+  /** Whether the Voice Notes feature is enabled - forwarded to registerMilkdownPlugins, which
+   * needs it at construction time (see App.tsx's Editor `key`, which remounts on change). */
+  voiceNotesEnabled: boolean;
   /** Every note in the vault, for the "link to a note" picker - not just the current one. */
   noteChoices: NoteLinkChoice[];
   /** Cmd/Ctrl-clicking an internal note:// link calls this with its target. */
@@ -115,6 +123,12 @@ interface EditorProps {
 }
 
 const AUTOSAVE_DELAY_MS = 1000;
+
+/** Remembers each note's scroll position (in its `.milkdown-scroll` container) across tab
+ * switches, keyed by notePath - module-level, not component state, because the whole Editor is
+ * unmounted and a fresh one remounted every time the active tab changes (see App.tsx's Editor
+ * `key`), which would otherwise reset every note back to the top on every visit. */
+const scrollPositions = new Map<string, number>();
 
 const CELL_COLORS: { label: string; value: string }[] = [
   { label: "Red", value: "rgba(248, 113, 113, 0.35)" },
@@ -688,6 +702,9 @@ function NoteEditor({
   toolbarVisible,
   sketchMode,
   onToggleSketchMode,
+  sketchEnabled,
+  codeBlockEnabled,
+  voiceNotesEnabled,
   noteChoices,
   onNavigateToNoteLink,
   scrollToAnchorId,
@@ -728,6 +745,9 @@ function NoteEditor({
   });
   const latestContentRef = useRef(initialContent);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // The note's own `.milkdown-scroll` pane - see the scroll-restore effect below and
+  // scrollPositions' own comment for why this needs to be tracked/restored manually.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Crop-mode-active lives in the selected image's NodeView, not in node
   // attrs (see imageView.ts) - mirrored here purely so the toolbar's Crop
@@ -806,6 +826,7 @@ function NoteEditor({
       setNoteLinkTrigger,
       noteLinkResultsRef,
       setSelectionRange,
+      voiceNotesEnabled,
     );
     return editor;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -851,6 +872,28 @@ function NoteEditor({
     // notePath is stable for the lifetime of this component (Editor is remounted per-note via a
     // `key` prop in App) - scrollToAnchorId/onScrolledToAnchor are only meant to be consumed
     // once, right at this mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Runs once per mount: restores this note's scroll position from wherever the user last left
+  // it (see scrollPositions), so switching tabs away and back - or going Home and back - doesn't
+  // dump them back at the top. Skipped when scrollToAnchorId is set, since that effect above is
+  // about to scroll (and smoothly animate) to a specific target instead - restoring a stale
+  // position here first would just fight it.
+  useEffect(() => {
+    if (scrollToAnchorId) return;
+    const saved = scrollPositions.get(notePath);
+    if (saved === undefined) return;
+    const restore = () => {
+      if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = saved;
+    };
+    restore();
+    // Milkdown's own view usually mounts before this effect runs, but one rAF retry covers the
+    // rare case where the content's layout isn't settled yet on the first attempt (same reasoning
+    // as the scrollToAnchorId effect above).
+    requestAnimationFrame(restore);
+    // notePath is stable for the lifetime of this component (Editor is remounted per-note via a
+    // `key` prop in App) - only meant to run once, right at this mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1293,17 +1336,21 @@ function NoteEditor({
       )}
       {toolbarVisible && !sketchMode && (
         <div className="border-subtle flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b px-3">
-          <button
-            type="button"
-            onClick={onToggleSketchMode}
-            title="Sketch on this note"
-            aria-label="Toggle sketch mode"
-            aria-pressed={sketchMode}
-            className="btn-ghost h-7 w-7 shrink-0"
-          >
-            <Brush size={14} />
-          </button>
-          <div className="divider mx-1 h-5 w-px shrink-0" />
+          {sketchEnabled && (
+            <>
+              <button
+                type="button"
+                onClick={onToggleSketchMode}
+                title="Sketch on this note"
+                aria-label="Toggle sketch mode"
+                aria-pressed={sketchMode}
+                className="btn-ghost h-7 w-7 shrink-0"
+              >
+                <Brush size={14} />
+              </button>
+              <div className="divider mx-1 h-5 w-px shrink-0" />
+            </>
+          )}
           <TextStyleDropdown
             blockStyle={selectionState.blockStyle}
             onSelect={(style) =>
@@ -1365,15 +1412,17 @@ function NoteEditor({
               <Crop size={14} />
             </button>
           )}
-          <button
-            type="button"
-            onClick={codeBlockButton.action}
-            title={codeBlockButton.label}
-            aria-label={codeBlockButton.label}
-            className="btn-ghost h-7 w-7 shrink-0"
-          >
-            <codeBlockButton.icon size={14} />
-          </button>
+          {codeBlockEnabled && (
+            <button
+              type="button"
+              onClick={codeBlockButton.action}
+              title={codeBlockButton.label}
+              aria-label={codeBlockButton.label}
+              className="btn-ghost h-7 w-7 shrink-0"
+            >
+              <codeBlockButton.icon size={14} />
+            </button>
+          )}
           <div className="divider mx-1 h-5 w-px shrink-0" />
           <LookDropdown look={look} onSelect={handleSelectLook} />
           {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}
@@ -1388,6 +1437,8 @@ function NoteEditor({
       />
 
       <div
+        ref={scrollContainerRef}
+        onScroll={(e) => scrollPositions.set(notePath, e.currentTarget.scrollTop)}
         className={`prose-note milkdown-scroll h-full flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`}
       >
         <div

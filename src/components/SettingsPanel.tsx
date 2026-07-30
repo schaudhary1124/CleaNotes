@@ -1,22 +1,30 @@
-import { useEffect } from "react";
-import { Check } from "lucide-react";
-import type { AppSettings, BackgroundStyle, ThemeName } from "../types";
+import { useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import {
+  Calendar,
+  Check,
+  Code,
+  GraduationCap,
+  Mic,
+  Pin,
+  RefreshCw,
+  Brush,
+} from "lucide-react";
+import type { AppSettings, FeatureFlags, ThemeName } from "../types";
+import type { AppUpdaterState } from "../hooks/useAppUpdater";
+import { Switch } from "./Switch";
 
 interface SettingsPanelProps {
   settings: AppSettings;
   onChange: (settings: AppSettings) => void;
   onClose: () => void;
+  updaterState: AppUpdaterState;
+  onCheckForUpdates: () => void;
 }
 
 const THEMES: { value: ThemeName; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "midnight", label: "Midnight" },
-];
-
-const BACKGROUNDS: { value: BackgroundStyle; label: string; description: string }[] = [
-  { value: "flat", label: "Flat", description: "Solid surfaces, no blur" },
-  { value: "soft", label: "Soft", description: "Gentle blur and depth" },
-  { value: "glass", label: "Glass", description: "Translucent, heavier blur" },
 ];
 
 const ACCENTS = [
@@ -28,7 +36,39 @@ const ACCENTS = [
   { value: "emerald", color: "rgb(5 150 105)" },
 ];
 
-export function SettingsPanel({ settings, onChange, onClose }: SettingsPanelProps) {
+const FEATURES: { key: keyof FeatureFlags; label: string; description: string; icon: typeof Calendar }[] = [
+  { key: "calendar", label: "Calendar", description: "Mini calendar in the sidebar", icon: Calendar },
+  { key: "sketch", label: "Sketch", description: "Freehand drawing on top of notes", icon: Brush },
+  { key: "studyMode", label: "Study Mode", description: "Flashcards and quizzes for a note", icon: GraduationCap },
+  { key: "codeBlock", label: "Code Block", description: "Insert syntax-highlighted code blocks", icon: Code },
+  { key: "keepOnTop", label: "Keep window on top", description: "Pin this window above others", icon: Pin },
+  { key: "voiceNotes", label: "Voice Notes", description: "Record audio notes inline", icon: Mic },
+];
+
+export function SettingsPanel({ settings, onChange, onClose, updaterState, onCheckForUpdates }: SettingsPanelProps) {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  // Set the moment a manual check is kicked off, so once the phase settles back to "idle" we
+  // know that was in response to this check (rather than just the hook's initial idle state) and
+  // can show "You're up to date" instead of nothing.
+  const justCheckedRef = useRef(false);
+  const [justCheckedIdle, setJustCheckedIdle] = useState(false);
+
+  useEffect(() => {
+    void getVersion().then(setAppVersion);
+  }, []);
+
+  useEffect(() => {
+    if (updaterState.phase === "checking") {
+      justCheckedRef.current = true;
+      setJustCheckedIdle(false);
+    } else if (updaterState.phase === "idle" && justCheckedRef.current) {
+      justCheckedRef.current = false;
+      setJustCheckedIdle(true);
+    } else if (updaterState.phase !== "idle") {
+      setJustCheckedIdle(false);
+    }
+  }, [updaterState.phase]);
+
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -36,6 +76,10 @@ export function SettingsPanel({ settings, onChange, onClose }: SettingsPanelProp
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  function toggleFeature(key: keyof FeatureFlags) {
+    onChange({ ...settings, features: { ...settings.features, [key]: !settings.features[key] } });
+  }
 
   return (
     <div className="glass-panel shadow-app animate-fade-in relative flex-1 overflow-y-auto">
@@ -97,24 +141,57 @@ export function SettingsPanel({ settings, onChange, onClose }: SettingsPanelProp
 
           <section>
             <p className="text-secondary mb-2 text-xs font-semibold uppercase tracking-wider">
-              Background style
+              Features
             </p>
-            <div className="space-y-1.5">
-              {BACKGROUNDS.map((bg) => (
-                <button
-                  key={bg.value}
-                  type="button"
-                  onClick={() => onChange({ ...settings, background: bg.value })}
-                  className={`flex w-full flex-col items-start gap-0.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors duration-150 ${
-                    settings.background === bg.value
-                      ? "border-accent-soft bg-accent-soft"
-                      : "border-subtle hover:bg-surface-hover"
-                  }`}
+            <div className="space-y-1">
+              {FEATURES.map((feature) => (
+                <div
+                  key={feature.key}
+                  className="border-subtle flex items-center gap-3 rounded-lg border px-3 py-2"
                 >
-                  <span className="text-primary font-medium">{bg.label}</span>
-                  <span className="text-tertiary text-xs">{bg.description}</span>
-                </button>
+                  <feature.icon size={16} className="text-secondary shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-primary text-sm font-medium">{feature.label}</p>
+                    <p className="text-tertiary text-xs">{feature.description}</p>
+                  </div>
+                  <Switch
+                    checked={settings.features[feature.key]}
+                    onChange={() => toggleFeature(feature.key)}
+                    label={`Toggle ${feature.label}`}
+                  />
+                </div>
               ))}
+            </div>
+          </section>
+
+          <section>
+            <p className="text-secondary mb-2 text-xs font-semibold uppercase tracking-wider">
+              Updates
+            </p>
+            <div className="border-subtle flex items-center gap-3 rounded-lg border px-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="text-primary text-sm font-medium">
+                  {appVersion ? `CleaNotes v${appVersion}` : "CleaNotes"}
+                </p>
+                <p className="text-tertiary text-xs">
+                  {updaterState.phase === "checking" && "Checking for updates…"}
+                  {updaterState.phase === "idle" && justCheckedIdle && "You're up to date"}
+                  {updaterState.phase === "idle" && !justCheckedIdle && "Check for the latest version"}
+                  {updaterState.phase === "available" && `Update available — v${updaterState.version}`}
+                  {updaterState.phase === "downloading" && "Downloading update…"}
+                  {updaterState.phase === "ready" && "Update ready — restart to install"}
+                  {updaterState.phase === "error" && "Couldn't check for updates"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCheckForUpdates}
+                disabled={updaterState.phase === "checking" || updaterState.phase === "downloading"}
+                className="btn-ghost border-subtle flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw size={13} className={updaterState.phase === "checking" ? "animate-spin" : ""} />
+                {updaterState.phase === "checking" ? "Checking…" : "Check for Updates"}
+              </button>
             </div>
           </section>
         </div>

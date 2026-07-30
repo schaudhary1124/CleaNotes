@@ -434,7 +434,12 @@ export function TabStrip({
   const hiddenTabs = hidden.map((p) => byPath.get(p)).filter((t): t is TabNote => t != null);
 
   return (
-    <div ref={stripRef} className="flex min-w-0 flex-1 items-center">
+    <div ref={stripRef} className="flex min-w-0 flex-1 items-center" data-tauri-drag-region="deep">
+      {/* Whatever's left over after the tabs + new-tab button (which is most of this box on a
+       * wide window with few tabs) is unclaimed background, so marking the whole strip as a
+       * drag region turns that slack into a way to drag the window - individual tabs/buttons
+       * are still clickable since Tauri's drag script treats clickable elements as blockers
+       * regardless of an ancestor's data-tauri-drag-region. */}
       {/* No flex-grow here (unlike stripRef) - this box sizes to its tabs' natural width so the
        * trailing controls hug the last tab instead of drifting to the row's far edge. It stays
        * shrinkable + clipped so pathologically narrow windows crop overflow instead of letting

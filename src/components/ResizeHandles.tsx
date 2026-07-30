@@ -2,6 +2,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const appWindow = getCurrentWindow();
 
+const isMac = navigator.userAgent.includes("Mac");
+
 const EDGE = 8;
 const CORNER = 16;
 
@@ -38,8 +40,18 @@ const corners: { direction: Direction; className: string; cursor: string }[] = [
  * Tauri doesn't give native OS edge-resize hit-testing when `decorations`
  * is false, so we drive resizing manually via invisible strips along each
  * edge/corner that call `startResizeDragging`.
+ *
+ * On macOS this call is a documented no-op (`tao`'s `drag_resize_window`
+ * returns `NotSupported` there and Tauri swallows the error), while the
+ * NSWindow's own `resizable` style mask still lets the OS resize from the
+ * true window edge on its own. Rendering these strips there would only
+ * plant a dead 8-16px band right on top of that native edge, capturing
+ * the mousedown and silently eating it. So skip the overlay entirely on
+ * macOS and let the native resize handle it.
  */
 export function ResizeHandles() {
+  if (isMac) return null;
+
   function startDrag(direction: Direction) {
     return (e: React.MouseEvent) => {
       if (e.button !== 0) return;

@@ -427,6 +427,13 @@ const BTN_GAP = 4;
 
 const EXPANDED_CLASS = "cb-expanded";
 
+/** Remembers which code block (by its doc position - stable as long as the note's content
+ * hasn't changed, which holds across a plain tab switch) was expanded per note, keyed by
+ * notePath - so switching tabs away and back restores it. Module-level (not per-view state)
+ * because the whole Editor, and with it this plugin's view, is destroyed and recreated on every
+ * tab switch (see App.tsx's Editor `key`); a view-local field would never survive that. */
+const expandedBlockPositions = new Map<string, number>();
+
 interface BlockButtons {
   del: HTMLButtonElement;
   expand: HTMLButtonElement;
@@ -515,8 +522,15 @@ class CodeBlockGripsView implements PluginView {
   // happens (its height is fixed by CSS), so ResizeObserver never fires for
   // it - this instead watches the block's subtree directly for that mount.
   private mutationObserver = new MutationObserver(() => this.repositionAll());
+  // Restoring expandedBlockPositions only makes sense once, right at mount - re-checking on
+  // every later sync() (e.g. after a doc-changing edit) risks matching a since-deleted block's
+  // old position against an unrelated new one that happens to land at the same offset.
+  private hasAttemptedExpandRestore = false;
 
-  constructor(view: EditorView) {
+  constructor(
+    view: EditorView,
+    private notePath: string,
+  ) {
     this.view = view;
     this.sync();
     window.addEventListener("resize", this.onWindowResize);
@@ -692,7 +706,27 @@ class CodeBlockGripsView implements PluginView {
       this.mutationObserver.observe(block, { childList: true, subtree: true });
     });
 
+    if (!this.hasAttemptedExpandRestore) {
+      this.hasAttemptedExpandRestore = true;
+      this.restoreExpandedBlock();
+    }
+
     this.repositionAll();
+  }
+
+  /** Re-expands whichever block was expanded the last time this note was open (see
+   * expandedBlockPositions), if any - matched by doc position since blocks have no other
+   * stable identity across a fresh Milkdown mount. */
+  private restoreExpandedBlock() {
+    const savedPos = expandedBlockPositions.get(this.notePath);
+    if (savedPos === undefined) return;
+    for (const block of this.buttons.keys()) {
+      const info = resolveCodeBlockInfo(this.view, block);
+      if (info && info.pos === savedPos) {
+        this.setExpanded(block, true);
+        return;
+      }
+    }
   }
 
   /** Toggles a code block between its normal in-flow size and filling the
@@ -720,8 +754,13 @@ class CodeBlockGripsView implements PluginView {
 
     if (expand) {
       this.expandedBlock = block;
+      const info = resolveCodeBlockInfo(this.view, block);
+      if (info) expandedBlockPositions.set(this.notePath, info.pos);
     } else {
-      if (this.expandedBlock === block) this.expandedBlock = null;
+      if (this.expandedBlock === block) {
+        this.expandedBlock = null;
+        expandedBlockPositions.delete(this.notePath);
+      }
       block.style.removeProperty("--cb-rect-top");
       block.style.removeProperty("--cb-rect-left");
       block.style.removeProperty("--cb-rect-width");
@@ -808,4 +847,6 @@ class CodeBlockGripsView implements PluginView {
   }
 }
 
-export const codeBlockGrips = $prose(() => new Plugin({ view: (view) => new CodeBlockGripsView(view) }));
+export function codeBlockGrips(notePath: string) {
+  return $prose(() => new Plugin({ view: (view) => new CodeBlockGripsView(view, notePath) }));
+}

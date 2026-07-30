@@ -141,6 +141,11 @@ interface RecordingState {
 class VoiceNoteGripsView implements PluginView {
   private view: EditorView;
   private notePath: string;
+  // Gates only the idle-line "add voice note" affordance below (see renderEntry/onDomMouseMove) -
+  // an existing recording's pill (and its click-to-open-popover/remove behavior) stays fully
+  // functional either way, so disabling the Voice Notes feature never strands already-recorded
+  // clips.
+  private enabled: boolean;
   private host: HTMLElement | null = null;
   // The margin controls render outside view.dom's own box (in .prose-note's right padding
   // gutter - see repositionAll), so hover tracking can't be bound to view.dom itself: the
@@ -154,9 +159,10 @@ class VoiceNoteGripsView implements PluginView {
   private resizeObserver = new ResizeObserver(() => this.repositionAll());
   private recording: RecordingState | null = null;
 
-  constructor(view: EditorView, notePath: string) {
+  constructor(view: EditorView, notePath: string, enabled: boolean) {
     this.view = view;
     this.notePath = notePath;
+    this.enabled = enabled;
     this.sync();
     window.addEventListener("resize", this.onWindowResize);
     this.hoverRoot = this.view.dom.closest<HTMLElement>(".prose-note") ?? this.view.dom;
@@ -188,7 +194,7 @@ class VoiceNoteGripsView implements PluginView {
     const y = event.clientY;
     let match: HTMLElement | null = null;
     for (const [el, entry] of this.entries) {
-      if (entry.voice.voiceId) continue;
+      if (entry.voice.voiceId || !this.enabled) continue;
       if (y >= entry.top && y <= entry.bottom) {
         match = el;
         break;
@@ -309,7 +315,7 @@ class VoiceNoteGripsView implements PluginView {
       btn.addEventListener("mousedown", (event) => event.preventDefault());
       btn.addEventListener("click", () => this.onPillClick(entry));
       entry.control.append(btn);
-    } else {
+    } else if (this.enabled) {
       entry.control.dataset.state = "add";
       const btn = document.createElement("button");
       btn.type = "button";
@@ -486,6 +492,6 @@ class VoiceNoteGripsView implements PluginView {
   }
 }
 
-export function voiceNoteGrips(notePath: string) {
-  return $prose(() => new Plugin({ view: (view) => new VoiceNoteGripsView(view, notePath) }));
+export function voiceNoteGrips(notePath: string, enabled: boolean = true) {
+  return $prose(() => new Plugin({ view: (view) => new VoiceNoteGripsView(view, notePath, enabled) }));
 }

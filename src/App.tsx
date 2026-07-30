@@ -144,13 +144,15 @@ function App() {
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
 
   // Update checks/prompts only make sense once, from the main window - see isMainWindow above.
-  const { state: updaterState, installUpdate, restartNow } = useAppUpdater(isMainWindow);
+  const { state: updaterState, checkNow, installUpdate, restartNow } = useAppUpdater(isMainWindow);
 
   const toolbarVisible = !settings.toolbarCollapsed;
   const handleToggleToolbar = () => setSettings((s) => ({ ...s, toolbarCollapsed: !s.toolbarCollapsed }));
 
   const sidebarCollapsed = settings.sidebarCollapsed;
   const handleToggleSidebarCollapse = () => setSettings((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }));
+
+  const handleToggleAlwaysOnTop = () => setSettings((s) => ({ ...s, alwaysOnTop: !s.alwaysOnTop }));
 
   const activeContentRef = useRef(activeContent);
   const activeNotePathRef = useRef(activeNotePath);
@@ -163,6 +165,10 @@ function App() {
   // window's save is applied here, since Milkdown only reads its initial value on mount.
   const [reloadToken, setReloadToken] = useState(0);
   const activeMode = activeNotePath ? tabModes[activeNotePath] ?? "edit" : "edit";
+  // Falls back to edit mode without touching tabModes, so a tab that was in Study before the
+  // feature got disabled just quietly resumes in Study if it's re-enabled later.
+  const effectiveMode = settings.features.studyMode ? activeMode : "edit";
+  const effectiveSketchMode = settings.features.sketch && sketchMode;
 
   useEffect(() => {
     activeContentRef.current = activeContent;
@@ -203,6 +209,12 @@ function App() {
     applySettingsToDocument(settings);
     saveSettings(settings);
   }, [settings]);
+
+  // Applies the persisted pin state to this window - also covers un-pinning if the "Keep window
+  // on top" feature is turned off while a window is currently pinned.
+  useEffect(() => {
+    void appWindow.setAlwaysOnTop(settings.alwaysOnTop && settings.features.keepOnTop);
+  }, [settings.alwaysOnTop, settings.features.keepOnTop]);
 
   function showToast(message: string) {
     setToast(message);
@@ -854,7 +866,7 @@ function App() {
         <Header
           view={view}
           onBack={handleBack}
-          mode={activeMode}
+          mode={effectiveMode}
           onModeChange={handleModeChange}
           onDuplicateWindow={handleDuplicateWindow}
           settingsOpen={settingsOpen}
@@ -866,6 +878,10 @@ function App() {
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebarCollapse={handleToggleSidebarCollapse}
+          studyModeFeatureEnabled={settings.features.studyMode}
+          keepOnTopFeatureEnabled={settings.features.keepOnTop}
+          alwaysOnTop={settings.alwaysOnTop}
+          onToggleAlwaysOnTop={handleToggleAlwaysOnTop}
           tabStrip={
             tabNotes.length > 0 ? (
               <TabStrip
@@ -887,6 +903,8 @@ function App() {
               settings={settings}
               onChange={setSettings}
               onClose={() => setSettingsOpen(false)}
+              updaterState={updaterState}
+              onCheckForUpdates={checkNow}
             />
           ) : (
             <>
@@ -918,6 +936,7 @@ function App() {
                 onSetStarred={handleSetStarred}
                 onRestoreFromTrash={handleRestoreFromTrash}
                 onRequestDeleteForever={handleRequestDeleteForever}
+                showCalendar={settings.features.calendar}
               />
 
               <main className="glass-panel shadow-app relative flex-1 overflow-hidden">
@@ -958,9 +977,9 @@ function App() {
                   />
                 )}
 
-                {bootStatus === "ready" && view === "note" && activeNote && activeMode === "edit" && (
+                {bootStatus === "ready" && view === "note" && activeNote && effectiveMode === "edit" && (
                   <Editor
-                    key={`${activeNote.path}:${reloadToken}`}
+                    key={`${activeNote.path}:${reloadToken}:${settings.features.voiceNotes}`}
                     notePath={activeNote.path}
                     initialContent={activeContent}
                     onChange={setActiveContent}
@@ -972,8 +991,11 @@ function App() {
                       await broadcastNoteSaved(activeNote.path, content);
                     }}
                     toolbarVisible={toolbarVisible}
-                    sketchMode={sketchMode}
+                    sketchMode={effectiveSketchMode}
                     onToggleSketchMode={() => setSketchMode((v) => !v)}
+                    sketchEnabled={settings.features.sketch}
+                    codeBlockEnabled={settings.features.codeBlock}
+                    voiceNotesEnabled={settings.features.voiceNotes}
                     noteChoices={allNotes}
                     onNavigateToNoteLink={handleNavigateToNoteLink}
                     scrollToAnchorId={
@@ -983,7 +1005,7 @@ function App() {
                   />
                 )}
 
-                {bootStatus === "ready" && view === "note" && activeNote && activeMode === "study" && (
+                {bootStatus === "ready" && view === "note" && activeNote && effectiveMode === "study" && (
                   <ErrorBoundary>
                     <StudyView key={activeNote.path} notePath={activeNote.path} />
                   </ErrorBoundary>

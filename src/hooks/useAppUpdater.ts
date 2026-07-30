@@ -59,5 +59,5 @@ export function useAppUpdater(enabled: boolean) {
     void relaunch();
   }, []);
 
-  return { state, installUpdate, restartNow };
+  return { state, checkNow, installUpdate, restartNow };
 }

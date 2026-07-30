@@ -64,6 +64,8 @@ interface SidebarProps {
   onSetStarred: (path: string, value: boolean) => void;
   onRestoreFromTrash: (items: TrashItem[]) => void;
   onRequestDeleteForever: (items: TrashItem[]) => void;
+  /** Whether the Calendar feature is enabled - see SettingsPanel.tsx's Features section. */
+  showCalendar: boolean;
 }
 
 interface MenuState {
@@ -100,6 +102,7 @@ export function Sidebar({
   onSetStarred,
   onRestoreFromTrash,
   onRequestDeleteForever,
+  showCalendar,
 }: SidebarProps) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [renaming, setRenaming] = useState<{ path: string } | null>(null);
@@ -532,7 +535,7 @@ export function Sidebar({
                     </>
                   )}
                 </div>
-              ) : (
+              ) : showCalendar ? (
                 <>
                   <div className="border-subtle rounded-xl border p-3">
                     <div className="mb-2 flex items-center gap-1">
@@ -626,7 +629,7 @@ export function Sidebar({
                     )}
                   </div>
                 </>
-              )}
+              ) : null}
             </div>
           )}
         </div>

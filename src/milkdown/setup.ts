@@ -104,6 +104,10 @@ export function registerMilkdownPlugins(
   onNoteLinkTriggerChange?: (info: NoteLinkTriggerInfo | null) => void,
   noteLinkResultsRef?: RefObject<NoteLinkTriggerChoice[]>,
   onSelectionRangeChanged?: (range: EditorSelectionRange | null) => void,
+  // Whether the add-voice-note affordance should be included - see voiceNoteGrips.ts for what
+  // this gates. Fixed at editor construction (like every other plugin here), so toggling it
+  // requires remounting the Editor - see App.tsx's Editor `key`.
+  voiceNotesEnabled: boolean = true,
 ) {
   function reportSelectionState(ctx: Ctx) {
     if (!onSelectionStateChanged) return;
@@ -177,7 +181,7 @@ export function registerMilkdownPlugins(
     .use(codeBlockComponent)
     // Adds the delete affordance the component above doesn't ship - see
     // codeBlockGrips.ts.
-    .use(codeBlockGrips)
+    .use(codeBlockGrips(notePath))
     // Registered after gfm so these table extensions (background/height
     // attrs, the markdown sidecar comment) override gfm's own node schemas -
     // Milkdown dedups node schemas by id and the last one `.use()`d wins.
@@ -224,7 +228,7 @@ export function registerMilkdownPlugins(
     // voiceNoteGrips.ts. Needs `notePath` (for writeAttachment when a recording is saved), which
     // none of the other plugins here require - same reasoning imageCommands.ts's insertImageFile
     // in Editor.tsx already closes over `notePath` for the same call.
-    .use(voiceNoteGrips(notePath))
+    .use(voiceNoteGrips(notePath, voiceNotesEnabled))
     // The `notePin` atom node ("Copy link to this point" in the selection toolbar - see
     // notePin.ts/notePinView.ts) and its markdown round-trip. Same ordering requirement as the
     // other sidecar remarks: must come after commonmark/gfm above.
