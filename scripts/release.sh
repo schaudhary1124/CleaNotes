@@ -10,6 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+PACKAGE_LOCK="package-lock.json"
 TAURI_CONF="src-tauri/tauri.conf.json"
 CARGO_TOML="src-tauri/Cargo.toml"
 CARGO_LOCK="src-tauri/Cargo.lock"
@@ -70,17 +71,21 @@ info "Syncing Cargo.lock..."
 cargo metadata --manifest-path "$CARGO_TOML" --format-version 1 >/dev/null
 
 echo
-git diff --stat -- package.json "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
+git diff --stat -- package.json "$PACKAGE_LOCK" "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
 echo
 read -rp "Commit, push main, tag $TAG, and publish once the build succeeds? [y/N] " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  git checkout -- package.json "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
+  git checkout -- package.json "$PACKAGE_LOCK" "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
   fail "Aborted. Version bump reverted."
 fi
 
 # --- commit, push, tag -----------------------------------------------------
-git add package.json "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
-git commit -m "chore(release): bump version to $NEW_VERSION"
+git add package.json "$PACKAGE_LOCK" "$TAURI_CONF" "$CARGO_TOML" "$CARGO_LOCK"
+if git diff --cached --quiet; then
+  info "Version files already at $NEW_VERSION - nothing to commit (retrying a previous build?)."
+else
+  git commit -m "chore(release): bump version to $NEW_VERSION"
+fi
 
 info "Pushing main..."
 git push origin main
