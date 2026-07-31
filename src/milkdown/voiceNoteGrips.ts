@@ -158,6 +158,12 @@ class VoiceNoteGripsView implements PluginView {
   private hovered: HTMLElement | null = null;
   private resizeObserver = new ResizeObserver(() => this.repositionAll());
   private recording: RecordingState | null = null;
+  // A live window-resize drag can dispatch "resize" events faster than the display refreshes -
+  // without this, every single one of those ran its own full repositionAll() pass over every
+  // eligible line in the note, several times more often than the screen could even show the
+  // result. Coalescing to one pass per animation frame (see onWindowResize) throws away nothing
+  // visible, since only the last-known size before each paint ever mattered anyway.
+  private resizeRaf: number | null = null;
 
   constructor(view: EditorView, notePath: string, enabled: boolean) {
     this.view = view;
@@ -180,13 +186,20 @@ class VoiceNoteGripsView implements PluginView {
     this.cancelRecording();
     this.resizeObserver.disconnect();
     window.removeEventListener("resize", this.onWindowResize);
+    if (this.resizeRaf !== null) cancelAnimationFrame(this.resizeRaf);
     this.hoverRoot?.removeEventListener("mousemove", this.onDomMouseMove);
     this.hoverRoot?.removeEventListener("mouseleave", this.onDomMouseLeave);
     this.entries.forEach((entry) => entry.control.remove());
     this.entries.clear();
   }
 
-  private onWindowResize = () => this.repositionAll();
+  private onWindowResize = () => {
+    if (this.resizeRaf !== null) return;
+    this.resizeRaf = requestAnimationFrame(() => {
+      this.resizeRaf = null;
+      this.repositionAll();
+    });
+  };
 
   // ---- hover reveal (add-affordance only - the pill is always visible) ----
   private onDomMouseMove = (event: MouseEvent) => {
@@ -256,13 +269,30 @@ class VoiceNoteGripsView implements PluginView {
   private repositionAll() {
     if (!this.host) return;
     const hostRect = this.host.getBoundingClientRect();
+    // Two passes, not one: reading a rect (getBoundingClientRect/getClientRects) right after
+    // writing another entry's control.style.top/left forces the browser to synchronously
+    // recompute layout before it can answer, since it can no longer trust its last-known
+    // geometry. Interleaved like that, this loop cost one forced reflow per eligible line in the
+    // *entire* note (scanEligibleLines walks the whole doc, not just what's scrolled into view) -
+    // on every single window-resize tick during a live drag. `.voice-line-control` is
+    // `position: absolute` (see index.css), so it never affects any entry's own layout - splitting
+    // into a read pass then a write pass is safe and collapses all those reflows into effectively
+    // one for the whole batch.
+    const measurements: { entry: LineEntry; top: number; left: number }[] = [];
     this.entries.forEach((entry) => {
       const rect = entry.el.getBoundingClientRect();
       entry.top = rect.top;
       entry.bottom = rect.bottom;
       const lineRect = this.firstLineRect(entry.el);
-      entry.control.style.top = `${lineRect.top - hostRect.top + (lineRect.height - 22) / 2}px`;
-      entry.control.style.left = `${rect.right - hostRect.left + 6}px`;
+      measurements.push({
+        entry,
+        top: lineRect.top - hostRect.top + (lineRect.height - 22) / 2,
+        left: rect.right - hostRect.left + 6,
+      });
+    });
+    measurements.forEach(({ entry, top, left }) => {
+      entry.control.style.top = `${top}px`;
+      entry.control.style.left = `${left}px`;
     });
   }
 

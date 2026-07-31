@@ -33,3 +33,10 @@ webkit2gtk = "2.0"
 glib = "0.18"
 gtk = "0.18"
 
+# Used by run()'s on_page_load hook in src/lib.rs to opt the webview's layer into continuous
+# redraw during a live window resize - see that hook's own comment for why. Versions left
+# unpinned beyond the minor: both are already resolved transitively via tauri/wry, so this just
+# names the versions already in the dependency graph rather than requesting new ones.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = "0.3"
+objc2-web-kit = "0.3"

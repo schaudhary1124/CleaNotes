@@ -225,6 +225,10 @@ function App() {
     const path = activeNotePathRef.current;
     if (!path) return;
     const content = activeContentRef.current;
+    // Nothing changed since the last save (the overwhelmingly common case when just switching
+    // tabs without editing) - skip the write plus the full-text search/backlinks reindex and
+    // cross-window broadcast it'd otherwise trigger on every single switch.
+    if (content === savedContentRef.current) return;
     try {
       await writeNote(path, content);
       savedContentRef.current = content;
@@ -592,10 +596,20 @@ function App() {
     let cancelled = false;
     let unlistenResize: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
+    let maximizeCheckTimer: ReturnType<typeof setTimeout> | undefined;
     (async () => {
       setIsMaximized(await appWindow.isMaximized());
-      const resizeFn = await appWindow.onResized(async () => {
-        setIsMaximized(await appWindow.isMaximized());
+      // A live edge-drag fires onResized dozens of times a second, and isMaximized() is an
+      // async IPC round trip - awaiting one on every single tick built up a backlog of
+      // in-flight calls faster than they could resolve. The maximize/restore transition this
+      // is actually watching for only ever happens at the start or end of a drag, so it's
+      // enough to check once resizing has paused rather than on every tick.
+      const resizeFn = await appWindow.onResized(() => {
+        if (maximizeCheckTimer) clearTimeout(maximizeCheckTimer);
+        maximizeCheckTimer = setTimeout(async () => {
+          maximizeCheckTimer = undefined;
+          setIsMaximized(await appWindow.isMaximized());
+        }, 120);
       });
       const closeFn = await appWindow.onCloseRequested(async (event) => {
         event.preventDefault();
@@ -612,6 +626,7 @@ function App() {
     })();
     return () => {
       cancelled = true;
+      if (maximizeCheckTimer) clearTimeout(maximizeCheckTimer);
       unlistenResize?.();
       unlistenClose?.();
     };

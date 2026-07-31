@@ -17,6 +17,27 @@ pub fn run() {
         // at all. This hooks that signal and shows an equivalent native GTK Yes/No dialog, so
         // the user is actually asked on every platform. No-op elsewhere.
         .on_page_load(|webview, payload| {
+            // This window (and any duplicated/mirrored note window - see windowInstance.ts) is
+            // transparent with custom chrome (see tauri.conf.json's `transparent`/
+            // `decorations`), so its "glass" panels rely on CSS backdrop-filter for their blur
+            // look. AppKit's default policy for a layer-backed view is to redraw its content
+            // only once at the start/end of a live resize drag and just scale the stale bitmap
+            // for every frame in between - which is what makes the window's content visibly
+            // lag/stretch behind the cursor while dragging an edge, unlike a native app's own
+            // views (whose blur/vibrancy the window server composites for free either way).
+            // Opting the webview's own layer into continuous redraw during live resize fixes
+            // that at the source. Harmless to reapply on every reload, so no need for the
+            // Linux block's hooked-once tracking below.
+            #[cfg(target_os = "macos")]
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                let _ = webview.with_webview(|platform_webview| unsafe {
+                    let view: &objc2_web_kit::WKWebView = &*platform_webview.inner().cast();
+                    view.setWantsLayer(true);
+                    view.setLayerContentsRedrawPolicy(
+                        objc2_app_kit::NSViewLayerContentsRedrawPolicy::DuringViewResize,
+                    );
+                });
+            }
             #[cfg(target_os = "linux")]
             {
                 use std::{collections::HashSet, sync::Mutex};
@@ -66,7 +87,7 @@ pub fn run() {
                     }
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let _ = (webview, payload);
         })
         .run(tauri::generate_context!())
