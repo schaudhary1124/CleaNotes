@@ -14,7 +14,6 @@ import {
   Square,
   Star,
   Trash2,
-  X,
 } from "lucide-react";
 import { flattenFolders, flattenNotes, type TrashItem } from "../utils/fsNotes";
 import { searchNotes, type SearchSnippet } from "../utils/searchIndex";
@@ -32,12 +31,9 @@ interface SidebarProps {
   /** Path of the note currently open in the editor, or null when browsing - drives the
    * "Linked mentions" backlinks section, which only makes sense while a note is open. */
   activeNotePath: string | null;
-  /** Whether the sidebar is showing as an open overlay - only meaningful once the app is
-   * narrow enough for it to become one, see the @max-2xl: classes below. */
-  open: boolean;
-  onClose: () => void;
-  /** Manually collapses the sidebar to zero width at normal (non-overlay) widths - independent
-   * of `open`, which only governs the narrow-viewport overlay behavior below. */
+  /** Manually collapses the sidebar to zero width - the only visibility control at any width,
+   * so the sidebar renders identically (and stays clipped by app-shell's rounded corners like
+   * any other in-flow child) regardless of how narrow the window gets. */
   collapsed: boolean;
   searchQuery: string;
   onSearchChange: (query: string) => void;
@@ -81,8 +77,6 @@ export function Sidebar({
   tree,
   trash,
   activeNotePath,
-  open,
-  onClose,
   collapsed,
   searchQuery,
   onSearchChange,
@@ -300,17 +294,11 @@ export function Sidebar({
 
   return (
     <>
-      {open && (
-        <div
-          className="hidden @max-2xl:fixed @max-2xl:inset-0 @max-2xl:z-30 @max-2xl:block @max-2xl:bg-black/30"
-          onClick={onClose}
-        />
-      )}
       <nav
         ref={containerRef}
-        className={`glass-panel border-subtle relative z-20 flex shrink-0 flex-col gap-1 overflow-hidden border-r py-2 transition-[width] duration-200 @max-2xl:fixed @max-2xl:inset-y-0 @max-2xl:left-0 @max-2xl:z-40 @max-2xl:w-64 @max-2xl:shadow-app-lg @max-2xl:transition-transform @max-2xl:duration-200 ${
+        className={`glass-panel border-subtle relative z-20 flex shrink-0 flex-col gap-1 overflow-hidden border-r py-2 transition-[width] duration-200 ${
           collapsed ? "w-0 border-r-0" : "w-64"
-        } ${open ? "" : "@max-2xl:-translate-x-full"}`}
+        }`}
       >
         <div className="flex items-center gap-1 px-2">
           <div className="border-subtle bg-surface-hover flex h-8 flex-1 items-center gap-2 rounded-lg border px-2.5">
@@ -323,15 +311,6 @@ export function Sidebar({
               className="text-primary placeholder:text-tertiary min-w-0 flex-1 bg-transparent text-xs focus:outline-none"
             />
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-ghost hidden h-7 w-7 shrink-0 @max-2xl:flex"
-            title="Close sidebar"
-            aria-label="Close sidebar"
-          >
-            <X size={14} />
-          </button>
         </div>
 
         {!isSearching && (

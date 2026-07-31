@@ -29,16 +29,8 @@ interface HeaderProps {
   onCloseSettings: () => void;
   toolbarVisible: boolean;
   onToggleToolbar: () => void;
-  /** Whether the sidebar overlay is currently open - only meaningful once the app is narrow
-   * enough for the sidebar to have become an overlay (see Sidebar.tsx's own @max-2xl: classes). */
-  sidebarOpen: boolean;
-  /** Opens the sidebar overlay - only rendered once the app is narrow enough for the sidebar to
-   * have become an overlay (see Sidebar.tsx's own @max-2xl: classes, which this button matches). */
-  onToggleSidebar: () => void;
-  /** Whether the sidebar is manually collapsed at normal (non-overlay) widths. */
+  /** Whether the sidebar is manually collapsed - the only sidebar visibility state, at any width. */
   sidebarCollapsed: boolean;
-  /** Collapses/expands the sidebar - only rendered at widths where it isn't already an overlay,
-   * complementing onToggleSidebar above. */
   onToggleSidebarCollapse: () => void;
   /** Whether the Study Mode feature is enabled - hides the Edit/Study ModeToggle when off. */
   studyModeFeatureEnabled: boolean;
@@ -65,8 +57,6 @@ export function Header({
   onCloseSettings,
   toolbarVisible,
   onToggleToolbar,
-  sidebarOpen,
-  onToggleSidebar,
   sidebarCollapsed,
   onToggleSidebarCollapse,
   studyModeFeatureEnabled,
@@ -92,7 +82,7 @@ export function Header({
   return (
     <header
       data-tauri-drag-region="deep"
-      className="glass-panel relative z-20 flex h-10 shrink-0 items-center gap-1.5 px-2.5 @max-sm:gap-1 @max-sm:px-2"
+      className="glass-panel relative z-30 flex h-10 shrink-0 items-center gap-1.5 px-2.5 @max-sm:gap-1 @max-sm:px-2"
     >
       <div className="flex min-w-0 flex-1 items-center gap-1.5" data-tauri-drag-region="deep">
         {settingsOpen ? (
@@ -109,17 +99,8 @@ export function Header({
           <>
             <button
               type="button"
-              onClick={onToggleSidebar}
-              className="btn-ghost hidden h-6 w-6 shrink-0 @max-2xl:flex"
-              title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            >
-              {sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
-            </button>
-            <button
-              type="button"
               onClick={onToggleSidebarCollapse}
-              className="btn-ghost flex h-6 w-6 shrink-0 @max-2xl:hidden"
+              className="btn-ghost flex h-6 w-6 shrink-0"
               title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
               aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
             >

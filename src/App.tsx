@@ -130,7 +130,6 @@ function App() {
   // (see scrollToAnchorId below), then cleared.
   const [pendingScrollAnchor, setPendingScrollAnchor] = useState<{ path: string; anchorId: string } | null>(null);
   const [view, setView] = useState<"home" | "note">("home");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [browseFilter, setBrowseFilter] = useState<BrowseFilter>("all");
   const [browseFolder, setBrowseFolder] = useState("");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -860,7 +859,6 @@ function App() {
         }
       } else if (e.key.toLowerCase() === "f") {
         e.preventDefault();
-        setSidebarOpen(true);
         setSettings((s) => (s.sidebarCollapsed ? { ...s, sidebarCollapsed: false } : s));
         setTimeout(() => searchInputRef.current?.focus(), 0);
       }
@@ -889,8 +887,6 @@ function App() {
           onCloseSettings={() => setSettingsOpen(false)}
           toolbarVisible={toolbarVisible}
           onToggleToolbar={handleToggleToolbar}
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={() => setSidebarOpen((v) => !v)}
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebarCollapse={handleToggleSidebarCollapse}
           studyModeFeatureEnabled={settings.features.studyMode}
@@ -929,8 +925,6 @@ function App() {
                 tree={tree}
                 trash={trash}
                 activeNotePath={view === "note" ? activeNotePath : null}
-                open={sidebarOpen}
-                onClose={() => setSidebarOpen(false)}
                 collapsed={sidebarCollapsed}
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
@@ -939,10 +933,7 @@ function App() {
                 filter={browseFilter}
                 onSelectFilter={handleSelectFilter}
                 onOpenFolder={handleOpenFolder}
-                onOpenNote={(path) => {
-                  setSidebarOpen(false);
-                  handleOpenNote(path);
-                }}
+                onOpenNote={handleOpenNote}
                 onDuplicateNote={handleDuplicateNote}
                 onPromptNewNote={promptNewNote}
                 onPromptNewFolder={promptNewFolder}
