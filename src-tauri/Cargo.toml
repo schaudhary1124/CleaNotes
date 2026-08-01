@@ -25,6 +25,10 @@ serde_json = "1"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# OS-native secure credential store (macOS Keychain / Windows Credential Manager / Linux Secret
+# Service) for the collaboration feature's device identity private key - see identity.rs. Chosen
+# over tauri-plugin-stronghold, which the Tauri project has marked for removal in v3.
+keyring = "3"
 
 # WebKitGTK has no native permission-prompt UI of its own (unlike macOS/Windows) - see run()'s
 # on_page_load hook in src/lib.rs, which shows an equivalent GTK dialog by hand.

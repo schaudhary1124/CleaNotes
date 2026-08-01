@@ -16,6 +16,7 @@ import {
 } from "@codemirror/search";
 import { EditorView as CodeMirrorView } from "@codemirror/view";
 import { CODE_BLOCK_DEFAULT_FONT_SIZE } from "./codeBlock";
+import { isInlineOnlyChange } from "./docChangeScope";
 
 /** Walks up from a position inside a code block's CodeMirror content to the
  * `code_block` node itself, the way tableGrips.ts's resolveRowInfo walks up
@@ -539,8 +540,14 @@ class CodeBlockGripsView implements PluginView {
 
   update(view: EditorView, prevState: EditorView["state"]) {
     this.view = view;
-    if (view.state.doc !== prevState.doc) this.sync();
-    else this.repositionAll();
+    // See voiceNoteGrips.ts's identical gate: `doc !== prevState.doc` is true on every
+    // keystroke, but sync() re-queries the whole rendered DOM for code blocks -
+    // isInlineOnlyChange skips that unless a code block could actually have been added/removed.
+    if (view.state.doc !== prevState.doc && !isInlineOnlyChange(prevState.doc, view.state.doc)) {
+      this.sync();
+    } else {
+      this.repositionAll();
+    }
   }
 
   destroy() {

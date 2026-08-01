@@ -1489,3 +1489,36 @@ input,
   transition: none;
 }
 
+/* A collaborator's live cursor - see yCursorPlugin in src/milkdown/setup.ts. The element
+   itself only carries border-color/background-color inline (set per-person from
+   yjsBridge.ts's colorForPubKey); everything else about its shape lives here. */
+.ProseMirror-yjs-cursor {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 2px solid;
+  border-right: 2px solid;
+  word-break: normal;
+  pointer-events: none;
+}
+/* The name tag riding above the caret - a small floating pill so it never shifts surrounding
+   text, matching how every other collaborative editor shows a live cursor's owner. */
+.ProseMirror-yjs-cursor > div {
+  position: absolute;
+  top: -1.15em;
+  left: -2px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: white;
+  white-space: nowrap;
+  user-select: none;
+  font-weight: 500;
+}
+/* A collaborator's live selection range - background-color (with alpha) is set inline per
+   person, same as the cursor above. */
+.ProseMirror-yjs-selection {
+  border-radius: 2px;
+}
+

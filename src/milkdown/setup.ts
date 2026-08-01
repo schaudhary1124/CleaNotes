@@ -6,13 +6,17 @@ import { clipboard } from "@milkdown/kit/plugin/clipboard";
 import { trailing } from "@milkdown/kit/plugin/trailing";
 import { cursor } from "@milkdown/kit/plugin/cursor";
 import { codeBlockComponent, codeBlockConfig } from "@milkdown/kit/component/code-block";
+import { $prose } from "@milkdown/kit/utils";
 import type { Editor } from "@milkdown/kit/core";
-import { editorViewCtx } from "@milkdown/kit/core";
+import { editorViewCtx, editorViewOptionsCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import type { MarkType } from "@milkdown/kit/prose/model";
 import type { EditorState } from "@milkdown/kit/prose/state";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { isInTable } from "@milkdown/kit/prose/tables";
+import { ySyncPlugin, yCursorPlugin, yUndoPlugin } from "y-prosemirror";
+import type { Awareness } from "y-protocols/awareness";
+import type { XmlFragment } from "yjs";
 import { getBlockAlign, getTableCellAlign } from "./alignmentCommands";
 import { alignmentSidecarRemark, configureAlignmentSchemas, type BlockAlign } from "./alignmentSchemaExtensions";
 import { codeBlockExtensions, codeBlockLanguages } from "./codeBlock";
@@ -92,6 +96,20 @@ export interface EditorSelectionRange {
   to: number;
 }
 
+/** Binds the editor to a live collaboration session - see src/collab/yjsBridge.ts, which
+ * creates `yXmlFragment` for either the owner (hostSession) or a guest (joinSession). Passing
+ * this swaps Milkdown's plain undo/redo history for Yjs-aware undo (see yUndoPlugin below,
+ * which only undoes *this device's own* edits, never a collaborator's) and, when `canEdit` is
+ * false (a Viewer, or the note is currently locked), makes the editor read-only. */
+export interface CollabPluginConfig {
+  yXmlFragment: XmlFragment;
+  canEdit: boolean;
+  /** Live cursors/selections/presence - see src/collab/yjsBridge.ts. Optional only so a caller
+   * mid-transition (e.g. the moment a session ends) can't be forced to fabricate one; in
+   * practice both hostSession and joinSession always provide it. */
+  awareness?: Awareness;
+}
+
 /** Assembles the full Milkdown plugin set used by the note editor: GFM +
  * commonmark formatting, undo/redo, clipboard/paste handling, the resolved
  * image view, and the custom flashcard/MCQ block. */
@@ -108,6 +126,7 @@ export function registerMilkdownPlugins(
   // this gates. Fixed at editor construction (like every other plugin here), so toggling it
   // requires remounting the Editor - see App.tsx's Editor `key`.
   voiceNotesEnabled: boolean = true,
+  collabSession?: CollabPluginConfig,
 ) {
   function reportSelectionState(ctx: Ctx) {
     if (!onSelectionStateChanged) return;
@@ -125,7 +144,7 @@ export function registerMilkdownPlugins(
     );
   }
 
-  return editor
+  const withCoreSchema = editor
     .config((ctx) => {
       ctx
         .get(listenerCtx)
@@ -166,6 +185,13 @@ export function registerMilkdownPlugins(
       // Layered after configureAlignmentSchemas so the two patches' sidecar comments emit in a
       // fixed, deterministic order - see voiceNoteSchemaExtensions.ts's own comment.
       configureVoiceNoteSchemas(ctx);
+      // Read-only for a Viewer collaborator (or when the owner has the note locked) - this is
+      // a UX signal only, not the actual security boundary, which lives entirely on the
+      // owner's device (see yjsBridge.ts's hostSession: it never applies/rebroadcasts an
+      // inbound update from a non-editor, independent of what this device's own UI allows).
+      if (collabSession && !collabSession.canEdit) {
+        ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => false }));
+      }
     })
     // Registered before commonmark/gfm so its handleKeyDown - which
     // intercepts plain Enter inside a table cell - runs before gfm's own
@@ -216,8 +242,24 @@ export function registerMilkdownPlugins(
     // so raw `<mark>`/`<u>` HTML nodes are in their final flat shape.
     .use(textDecorationPlugins)
     .use(columnResizingPlugin)
-    .use(tableGrips)
-    .use(history)
+    .use(tableGrips);
+
+  // Yjs-aware undo (only ever undoes *this device's own* edits - see yUndoPlugin's default
+  // trackedOrigins, which tracks ySyncPluginKey and nothing else, so a collaborator's inbound
+  // update, applied with their peerId as origin in yjsBridge.ts, is automatically excluded from
+  // this device's undo stack) replaces Milkdown's plain history plugin when collaborating -
+  // the two are mutually exclusive, never both registered at once.
+  const withHistory = collabSession
+    ? withCoreSchema
+        .use($prose(() => ySyncPlugin(collabSession.yXmlFragment)))
+        .use($prose(() => yUndoPlugin()))
+        // Renders every other connected collaborator's live cursor/selection as a colored
+        // caret + name tag (see index.css's .ProseMirror-yjs-cursor/-selection rules) -
+        // conditional on awareness actually being provided, same as the rest of this block.
+        .use(collabSession.awareness ? $prose(() => yCursorPlugin(collabSession.awareness!)) : [])
+    : withCoreSchema.use(history);
+
+  return withHistory
     .use(listener)
     .use(clipboard)
     .use(trailing)

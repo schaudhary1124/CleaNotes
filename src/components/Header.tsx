@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowLeft,
   Copy,
+  Lock,
   MoreHorizontal,
   Minus,
   PanelLeftClose,
@@ -12,10 +13,13 @@ import {
   Pin,
   PinOff,
   Settings,
+  Share2,
   Square,
+  Unlock,
   X,
 } from "lucide-react";
 import { ModeToggle } from "./ModeToggle";
+import type { PresenceEntry } from "../collab/usePresence";
 import type { AppMode } from "../types";
 
 interface HeaderProps {
@@ -24,6 +28,16 @@ interface HeaderProps {
   mode: AppMode;
   onModeChange: (mode: AppMode) => void;
   onDuplicateWindow: () => void;
+  /** Opens the sharing/collaboration dialog for the currently open note - undefined when not
+   * viewing a note (the button/menu entry are hidden in that case). */
+  onOpenShare?: () => void;
+  /** Whether the open note currently has a live collaboration session running - the lock
+   * toggle only makes sense (and is only shown) while that's true. */
+  collabActive: boolean;
+  noteLocked: boolean;
+  onToggleLock: () => void;
+  /** Who else is currently present on the open note - see src/collab/usePresence.ts. */
+  collabPresence: PresenceEntry[];
   settingsOpen: boolean;
   onOpenSettings: () => void;
   onCloseSettings: () => void;
@@ -52,6 +66,11 @@ export function Header({
   mode,
   onModeChange,
   onDuplicateWindow,
+  onOpenShare,
+  collabActive,
+  noteLocked,
+  onToggleLock,
+  collabPresence,
   settingsOpen,
   onOpenSettings,
   onCloseSettings,
@@ -167,6 +186,47 @@ export function Header({
               >
                 <Copy size={14} />
               </button>
+              {view === "note" && collabPresence.length > 0 && (
+                <div className="mx-1 flex items-center gap-1" title={collabPresence.map((p) => p.name).join(", ")}>
+                  {collabPresence.slice(0, 4).map((p) => (
+                    <div
+                      key={p.clientId}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+                      style={{ backgroundColor: p.color }}
+                    >
+                      {p.name.slice(0, 1).toUpperCase()}
+                    </div>
+                  ))}
+                  {collabPresence.length > 4 && (
+                    <div className="bg-surface-strong text-secondary flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold">
+                      +{collabPresence.length - 4}
+                    </div>
+                  )}
+                </div>
+              )}
+              {view === "note" && onOpenShare && (
+                <button
+                  type="button"
+                  onClick={onOpenShare}
+                  className="btn-ghost h-6 w-6"
+                  title="Share this note"
+                  aria-label="Share this note"
+                >
+                  <Share2 size={14} />
+                </button>
+              )}
+              {view === "note" && collabActive && (
+                <button
+                  type="button"
+                  onClick={onToggleLock}
+                  className={`btn-ghost h-6 w-6 ${noteLocked ? "bg-accent-soft text-accent" : ""}`}
+                  title={noteLocked ? "Unlock note (let collaborators edit again)" : "Lock note (pause collaborators' editing)"}
+                  aria-pressed={noteLocked}
+                  aria-label={noteLocked ? "Unlock note" : "Lock note"}
+                >
+                  {noteLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                </button>
+              )}
               {keepOnTopFeatureEnabled && (
                 <button
                   type="button"
@@ -234,6 +294,32 @@ export function Header({
                     <Copy size={14} />
                     {view === "note" ? "Open this note in a new window" : "Open a new window"}
                   </button>
+                  {view === "note" && onOpenShare && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMoreOpen(false);
+                        onOpenShare();
+                      }}
+                      className="menu-item flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left"
+                    >
+                      <Share2 size={14} />
+                      Share this note
+                    </button>
+                  )}
+                  {view === "note" && collabActive && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMoreOpen(false);
+                        onToggleLock();
+                      }}
+                      className="menu-item flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left"
+                    >
+                      {noteLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                      {noteLocked ? "Unlock note" : "Lock note"}
+                    </button>
+                  )}
                   {keepOnTopFeatureEnabled && (
                     <button
                       type="button"

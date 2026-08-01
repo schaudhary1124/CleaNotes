@@ -10,6 +10,8 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { NewItemDialog } from "./components/NewItemDialog";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ShareDialog } from "./components/ShareDialog";
+import { JoinSharedNoteDialog } from "./components/JoinSharedNoteDialog";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { TabStrip } from "./components/TabStrip";
 import { useAppUpdater } from "./hooks/useAppUpdater";
@@ -44,6 +46,10 @@ import {
   type MergeTabPayload,
 } from "./utils/windowInstance";
 import { broadcastNoteSaved, listenForNoteSaved } from "./utils/noteSync";
+import { getAcl, setLocked } from "./collab/acl";
+import { loadOrCreateIdentity } from "./collab/identity";
+import { hostSession, type HostedSession } from "./collab/yjsBridge";
+import { usePresence } from "./collab/usePresence";
 import type { NoteLinkTarget } from "./milkdown/noteLinkHref";
 import { loadMainTabSession, saveMainTabSession } from "./utils/tabSession";
 import {
@@ -138,6 +144,15 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [newItemDialog, setNewItemDialog] = useState<NewItemDialogState | null>(null);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [joinSharedNoteOpen, setJoinSharedNoteOpen] = useState(false);
+  // Bumped by ShareDialog after granting/revoking a collaborator, so the effect below re-checks
+  // whether the active note should start (or could stop) hosting a live session - see its own
+  // comment for why this, rather than the ACL object itself, is what it depends on.
+  const [collabVersion, setCollabVersion] = useState(0);
+  const [hasActiveCollaborators, setHasActiveCollaborators] = useState(false);
+  const [noteLocked, setNoteLocked] = useState(false);
+  const [activeCollabSession, setActiveCollabSession] = useState<HostedSession | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
@@ -174,6 +189,9 @@ function App() {
   }, [activeContent]);
   useEffect(() => {
     activeNotePathRef.current = activeNotePath;
+    // Closes the Share dialog rather than leaving it open against whatever note happens to be
+    // active next - it has no "which note" of its own beyond the prop it was opened with.
+    setShareDialogOpen(false);
   }, [activeNotePath]);
   useEffect(() => {
     tabsRef.current = tabs;
@@ -831,6 +849,79 @@ function App() {
   // Every note in the vault, for the editor's "link to a note" picker - not just the active one.
   const allNotes = useMemo(() => flattenNotes(tree), [tree]);
 
+  // Whether the active note currently has anyone actively granted access - re-checked whenever
+  // the active note changes or ShareDialog bumps collabVersion after a grant/revoke. Kept as its
+  // own boolean (rather than having the hosting effect below read the ACL directly) so that
+  // effect only restarts the session on an actual "should we be hosting at all" flip, not on
+  // every unrelated ACL tweak (a role change or an additional grant to an already-active session
+  // is instead picked up by hostSession's own internal ACL polling - see yjsBridge.ts).
+  useEffect(() => {
+    if (view !== "note" || !activeNote) {
+      setHasActiveCollaborators(false);
+      setNoteLocked(false);
+      return;
+    }
+    let cancelled = false;
+    void getAcl(activeNote.path).then((acl) => {
+      if (cancelled) return;
+      setHasActiveCollaborators(!!acl?.collaborators.some((c) => c.status === "active"));
+      setNoteLocked(!!acl?.locked);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, activeNote, collabVersion]);
+
+  // Starts hosting the moment the open note has any active collaborator, and tears the session
+  // down on cleanup (note closed/switched, or the last collaborator revoked) - "as long as the
+  // note is open and the device is on" is the whole point of the owner-as-server model, so this
+  // deliberately doesn't wait for the Share dialog to be open.
+  useEffect(() => {
+    if (!hasActiveCollaborators || view !== "note" || !activeNote) {
+      setActiveCollabSession(null);
+      return;
+    }
+    let cancelled = false;
+    let session: HostedSession | null = null;
+    (async () => {
+      try {
+        const identity = await loadOrCreateIdentity();
+        if (cancelled) return;
+        const started = await hostSession(activeNote.path, identity);
+        if (cancelled) {
+          started.close();
+          return;
+        }
+        session = started;
+        setActiveCollabSession(started);
+      } catch {
+        // Note stopped being shared, or the identity/keychain call failed - either way there's
+        // nothing to host right now; hasActiveCollaborators's own next poll will reconcile.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      session?.close();
+      setActiveCollabSession(null);
+    };
+  }, [hasActiveCollaborators, view, activeNote]);
+
+  // Who else is currently present on the open note, for Header's avatar row - see usePresence's
+  // own comment for why this reads awareness directly rather than App tracking its own list.
+  const collabPresence = usePresence(activeCollabSession?.awareness);
+
+  /** Toggles the note's "instant lock" - every collaborator becomes temporarily read-only
+   * without revoking anyone. Pushes the change live to whoever's currently connected, on top of
+   * the persisted ACL write (see notifyAclChanged's own comment on why both). */
+  async function handleToggleLock() {
+    if (!activeNote) return;
+    const next = !noteLocked;
+    setNoteLocked(next);
+    await setLocked(activeNote.path, next);
+    setCollabVersion((v) => v + 1);
+    void activeCollabSession?.notifyAclChanged();
+  }
+
   /** New-note action for the tab strip's "+" button: creates a sibling of the active tab's
    * note, or falls back to the vault root if no note is open. */
   const handleNewNoteInActiveFolder = useCallback(() => {
@@ -882,6 +973,11 @@ function App() {
           mode={effectiveMode}
           onModeChange={handleModeChange}
           onDuplicateWindow={handleDuplicateWindow}
+          onOpenShare={view === "note" && activeNote ? () => setShareDialogOpen(true) : undefined}
+          collabActive={!!activeCollabSession}
+          noteLocked={noteLocked}
+          onToggleLock={() => void handleToggleLock()}
+          collabPresence={collabPresence}
           settingsOpen={settingsOpen}
           onOpenSettings={() => setSettingsOpen(true)}
           onCloseSettings={() => setSettingsOpen(false)}
@@ -937,6 +1033,7 @@ function App() {
                 onDuplicateNote={handleDuplicateNote}
                 onPromptNewNote={promptNewNote}
                 onPromptNewFolder={promptNewFolder}
+                onJoinSharedNote={() => setJoinSharedNoteOpen(true)}
                 onRename={handleRename}
                 onDeleteEntry={handleDeleteEntry}
                 onMove={handleMove}
@@ -987,10 +1084,18 @@ function App() {
 
                 {bootStatus === "ready" && view === "note" && activeNote && effectiveMode === "edit" && (
                   <Editor
-                    key={`${activeNote.path}:${reloadToken}:${settings.features.voiceNotes}`}
+                    key={`${activeNote.path}:${reloadToken}:${settings.features.voiceNotes}:${activeCollabSession ? "collab" : "solo"}`}
                     notePath={activeNote.path}
                     initialContent={activeContent}
-                    onChange={setActiveContent}
+                    onChange={(value) => {
+                      // Not setActiveContent: that's a useState setter, and calling it on every
+                      // keystroke re-renders all of App (including Sidebar/Header) for no
+                      // rendering purpose - activeContent's only JSX use is initialContent above,
+                      // which just seeds a freshly-keyed Editor mount. Every "read the live
+                      // value" consumer already goes through activeContentRef, so updating it
+                      // directly here keeps them correct without the unnecessary re-render.
+                      activeContentRef.current = value;
+                    }}
                     onSave={async (content) => {
                       await writeNote(activeNote.path, content);
                       savedContentRef.current = content;
@@ -1010,6 +1115,11 @@ function App() {
                       pendingScrollAnchor?.path === activeNote.path ? pendingScrollAnchor.anchorId : undefined
                     }
                     onScrolledToAnchor={() => setPendingScrollAnchor(null)}
+                    collabSession={
+                      activeCollabSession
+                        ? { yXmlFragment: activeCollabSession.yXmlFragment, canEdit: true, awareness: activeCollabSession.awareness }
+                        : undefined
+                    }
                   />
                 )}
 
@@ -1056,6 +1166,20 @@ function App() {
             onCancel={() => setNewItemDialog(null)}
           />
         )}
+
+        {shareDialogOpen && activeNote && (
+          <ShareDialog
+            notePath={activeNote.path}
+            noteTitle={activeNote.title}
+            onClose={() => setShareDialogOpen(false)}
+            onAclChanged={() => {
+              setCollabVersion((v) => v + 1);
+              void activeCollabSession?.notifyAclChanged();
+            }}
+          />
+        )}
+
+        {joinSharedNoteOpen && <JoinSharedNoteDialog onClose={() => setJoinSharedNoteOpen(false)} />}
 
         {toast && (
           <div className="glass-surface shadow-app-lg animate-fade-in absolute bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl px-4 py-2.5 text-sm">

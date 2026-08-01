@@ -43,9 +43,10 @@ import {
   wrapInHeadingCommand,
 } from "@milkdown/kit/preset/commonmark";
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
+import { redoCommand as yRedoCommand, undoCommand as yUndoCommand } from "y-prosemirror";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
 import { getNoteLook, readSketch, setNoteLook, writeAttachment, writeSketch } from "../utils/fsNotes";
-import type { BlockStyle, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
+import type { BlockStyle, CollabPluginConfig, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
 import { getSelectionState, registerMilkdownPlugins } from "../milkdown/setup";
 import { setBlockAlign, setTableColumnAlign } from "../milkdown/alignmentCommands";
 import type { BlockAlign } from "../milkdown/alignmentSchemaExtensions";
@@ -120,6 +121,11 @@ interface EditorProps {
   /** Called once this mount has acted on `scrollToAnchorId` (found or not), so the caller can
    * clear its pending state instead of re-triggering on the next unrelated re-render. */
   onScrolledToAnchor?: () => void;
+  /** When present, binds this editor to a live collaboration session - see
+   * src/collab/yjsBridge.ts and setup.ts's CollabPluginConfig. Fixed at construction like
+   * voiceNotesEnabled above (see App.tsx's Editor `key`, which remounts when a session
+   * starts/ends since it changes which undo plugin and editable state get registered). */
+  collabSession?: CollabPluginConfig;
 }
 
 const AUTOSAVE_DELAY_MS = 1000;
@@ -709,6 +715,7 @@ function NoteEditor({
   onNavigateToNoteLink,
   scrollToAnchorId,
   onScrolledToAnchor,
+  collabSession,
 }: EditorProps) {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -827,6 +834,7 @@ function NoteEditor({
       noteLinkResultsRef,
       setSelectionRange,
       voiceNotesEnabled,
+      collabSession,
     );
     return editor;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1039,7 +1047,16 @@ function NoteEditor({
       debouncedSaveSketch(entry.strokes);
     } else {
       redoStackRef.current.push({ kind: "mark" });
-      run((ctx) => callCommand(undoCommand.key)(ctx));
+      // Milkdown's history plugin isn't registered while collaborating - see setup.ts's
+      // CollabPluginConfig, which swaps it for y-prosemirror's own undo/redo instead.
+      if (collabSession) {
+        run((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          yUndoCommand(view.state, view.dispatch, view);
+        });
+      } else {
+        run((ctx) => callCommand(undoCommand.key)(ctx));
+      }
     }
     setCanUndo(undoStackRef.current.length > 0);
     setCanRedo(true);
@@ -1054,7 +1071,14 @@ function NoteEditor({
       debouncedSaveSketch(entry.strokes);
     } else {
       undoStackRef.current.push({ kind: "mark" });
-      run((ctx) => callCommand(redoCommand.key)(ctx));
+      if (collabSession) {
+        run((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          yRedoCommand(view.state, view.dispatch, view);
+        });
+      } else {
+        run((ctx) => callCommand(redoCommand.key)(ctx));
+      }
     }
     setCanUndo(true);
     setCanRedo(redoStackRef.current.length > 0);

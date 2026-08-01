@@ -4,16 +4,22 @@ import {
   Calendar,
   Check,
   Code,
+  Copy,
   Download,
   GraduationCap,
+  KeyRound,
   Mic,
   Pin,
   RefreshCw,
   RotateCcw,
   Brush,
+  UserX,
 } from "lucide-react";
 import type { AppSettings, FeatureFlags, ThemeName } from "../types";
 import type { AppUpdaterState } from "../hooks/useAppUpdater";
+import { listSharedNotes, revokeCollaborator, type SharedNoteSummary } from "../collab/acl";
+import { loadOrCreateIdentity } from "../collab/identity";
+import { formatRelativeTime } from "../utils/relativeTime";
 import { Switch } from "./Switch";
 
 interface SettingsPanelProps {
@@ -59,6 +65,9 @@ export function SettingsPanel({
   onRestart,
 }: SettingsPanelProps) {
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [devicePublicKey, setDevicePublicKey] = useState<string | null>(null);
+  const [keyCopied, setKeyCopied] = useState(false);
+  const [sharedNotes, setSharedNotes] = useState<SharedNoteSummary[] | null>(null);
   // Set the moment a manual check is kicked off, so once the phase settles back to "idle" we
   // know that was in response to this check (rather than just the hook's initial idle state) and
   // can show "You're up to date" instead of nothing.
@@ -68,6 +77,27 @@ export function SettingsPanel({
   useEffect(() => {
     void getVersion().then(setAppVersion);
   }, []);
+
+  useEffect(() => {
+    void loadOrCreateIdentity().then((identity) => setDevicePublicKey(identity.publicKeyHex));
+    void refreshSharedNotes();
+  }, []);
+
+  function refreshSharedNotes() {
+    return listSharedNotes().then(setSharedNotes);
+  }
+
+  async function handleRevokeFromSettings(notePath: string, pubKey: string) {
+    await revokeCollaborator(notePath, pubKey);
+    void refreshSharedNotes();
+  }
+
+  async function handleCopyKey() {
+    if (!devicePublicKey) return;
+    await navigator.clipboard.writeText(devicePublicKey);
+    setKeyCopied(true);
+    setTimeout(() => setKeyCopied(false), 2000);
+  }
 
   useEffect(() => {
     if (updaterState.phase === "checking") {
@@ -196,6 +226,69 @@ export function SettingsPanel({
                   />
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section>
+            <p className="text-secondary mb-2 text-xs font-semibold uppercase tracking-wider">
+              Collaboration
+            </p>
+            <div className="space-y-3">
+              <div className="border-subtle flex items-center gap-3 rounded-lg border px-3 py-2.5">
+                <KeyRound size={16} className="text-secondary shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-primary text-sm font-medium">This device's identity</p>
+                  <p className="text-tertiary truncate font-mono text-xs">
+                    {devicePublicKey ? `${devicePublicKey.slice(0, 12)}…${devicePublicKey.slice(-12)}` : "Generating…"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyKey()}
+                  disabled={!devicePublicKey}
+                  className="btn-ghost h-8 w-8 shrink-0"
+                  title="Copy full public key"
+                  aria-label="Copy full public key"
+                >
+                  {keyCopied ? <Check size={14} /> : <Copy size={14} />}
+                </button>
+              </div>
+
+              {sharedNotes && sharedNotes.some((s) => s.acl.collaborators.some((c) => c.status === "active")) && (
+                <div>
+                  <p className="text-tertiary mb-1.5 text-xs">Notes you've shared</p>
+                  <div className="space-y-2">
+                    {sharedNotes
+                      .filter((s) => s.acl.collaborators.some((c) => c.status === "active"))
+                      .map((shared) => (
+                        <div key={shared.notePath} className="border-subtle rounded-lg border px-3 py-2">
+                          <p className="text-primary truncate text-sm font-medium">{shared.noteTitle}</p>
+                          <div className="mt-1.5 space-y-1">
+                            {shared.acl.collaborators
+                              .filter((c) => c.status === "active")
+                              .map((c) => (
+                                <div key={c.pubKey} className="flex items-center gap-2">
+                                  <span className="text-secondary flex-1 truncate text-xs">
+                                    {c.displayName} · {c.role}
+                                    {c.lastSeenAt ? ` · seen ${formatRelativeTime(c.lastSeenAt)}` : ""}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleRevokeFromSettings(shared.notePath, c.pubKey)}
+                                    className="btn-ghost h-6 w-6 shrink-0 hover:bg-red-500/20 hover:text-red-500"
+                                    title={`Revoke ${c.displayName}'s access`}
+                                    aria-label={`Revoke ${c.displayName}'s access`}
+                                  >
+                                    <UserX size={12} />
+                                  </button>
+                                </div>
+                              ))}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 

@@ -132,3 +132,43 @@ export interface SketchData {
   version: 1;
   strokes: SketchStroke[];
 }
+
+/** Whether a collaborator can only view a shared note, or also edit it - enforced by the
+ * owner's session code (see src/collab/), never trusted from a client's own claim. */
+export type CollabRole = "viewer" | "editor";
+
+/** One person the owner has granted access to a note - see fsNotes.ts's `.collab.json`
+ * sidecar and CollabAcl below. */
+export interface Collaborator {
+  /** Hex-encoded Ed25519 public key identifying this collaborator's device - see
+   * src/collab/identity.ts. The actual root of trust; displayName is cosmetic only. */
+  pubKey: string;
+  displayName: string;
+  role: CollabRole;
+  /** Epoch ms when the owner approved this collaborator's first pairing request. */
+  grantedAt: number;
+  /** Epoch ms this collaborator was last connected, if ever. */
+  lastSeenAt?: number;
+  /** Revoked entries are kept (not deleted) so the owner has a durable audit trail of who
+   * has ever had access - see fsNotes.ts's readCollabAcl/writeCollabAcl. */
+  status: "active" | "revoked";
+}
+
+/** A note's sharing state - see fsNotes.ts's `.collab.json` sidecar, parallel to SketchData's
+ * `.sketch.json`. Only exists for notes that have been shared at least once. */
+export interface CollabAcl {
+  version: 1;
+  /** Stable id for this note's collaboration session/CRDT document, independent of its
+   * current filesystem path. The sidecar file itself still travels with the note on
+   * rename/move like SketchData's does (see fsNotes.ts's relocateCollab), so this doesn't
+   * need to be re-derived on every rename - it just avoids ever tying session/room identity
+   * directly to a mutable path string. */
+  noteId: string;
+  /** Hex-encoded Ed25519 public key of this note's owner, i.e. this device - ownership is
+   * intrinsic (whoever's vault the note lives in), never assigned by a server. */
+  ownerPubKey: string;
+  /** When true, every collaborator is temporarily read-only regardless of role - the
+   * "instant lock" security feature, reversible, independent of revoking anyone. */
+  locked: boolean;
+  collaborators: Collaborator[];
+}

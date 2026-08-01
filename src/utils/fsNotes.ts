@@ -12,7 +12,16 @@ import {
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import { extractStudyItemsAndStrip } from "./markdownParser";
-import type { FolderEntry, NoteEntry, NoteLook, NoteSummary, SketchData, StudyItem, TreeEntry } from "../types";
+import type {
+  CollabAcl,
+  FolderEntry,
+  NoteEntry,
+  NoteLook,
+  NoteSummary,
+  SketchData,
+  StudyItem,
+  TreeEntry,
+} from "../types";
 
 /** Notes live under the user's OS Documents folder, e.g. ~/Documents/CleaNotes */
 export const NOTES_DIR = "CleaNotes";
@@ -36,6 +45,10 @@ const SKETCH_EXTENSION = ".sketch.json";
 // Sidecar file next to the note holding its flashcards/MCQs, kept fully
 // separate from the note's Markdown content/editor - see StudyView.tsx.
 const STUDY_EXTENSION = ".study.json";
+// Sidecar file next to the note holding its sharing/permissions state (see CollabAcl in
+// types.ts and src/collab/acl.ts), same no-leading-dot reasoning as SKETCH_EXTENSION. Only
+// created once a note is first shared - most notes never have one.
+const COLLAB_EXTENSION = ".collab.json";
 // No leading dot: Tauri's fs scope glob matching (`CleaNotes/**`) doesn't match dotfiles,
 // which would silently block reads/writes of this file.
 const META_FILE = "cleanotes-meta.json";
@@ -266,6 +279,11 @@ function studyPathFor(notePath: string): string {
   return notePath.slice(0, -NOTE_EXTENSION.length) + STUDY_EXTENSION;
 }
 
+/** Sidecar sharing/permissions path for a note, e.g. "Work/Todo.md" -> "Work/Todo.collab.json" */
+function collabPathFor(notePath: string): string {
+  return notePath.slice(0, -NOTE_EXTENSION.length) + COLLAB_EXTENSION;
+}
+
 /**
  * One-time migration from the app's pre-rename layout: if a legacy PlaiNotes folder exists
  * and CleaNotes doesn't yet, renames the whole folder in place (a single directory rename -
@@ -432,6 +450,7 @@ export async function deleteNote(path: string): Promise<void> {
     });
     await relocateSketch(path, trashPath);
     await relocateStudyItems(path, trashPath);
+    await relocateCollab(path, trashPath);
 
     const meta = await readMeta();
     const next = remapMetaPaths(meta, path, trashPath);
@@ -526,6 +545,7 @@ export async function restoreFromTrash(trashPath: string): Promise<RestoreResult
     if (type === "note") {
       await relocateSketch(trashPath, finalPath);
       await relocateStudyItems(trashPath, finalPath);
+      await relocateCollab(trashPath, finalPath);
     }
 
     return { path: finalPath, restoredToRoot };
@@ -541,6 +561,7 @@ export async function deleteForever(trashPath: string, type: "note" | "folder"):
       await remove(fullPath(trashPath), { baseDir: BASE_DIR });
       await deleteSketch(trashPath);
       await deleteStudyItems(trashPath);
+      await deleteCollabAcl(trashPath);
     }
     const meta = await readMeta();
     // dropMetaPaths cleans up the color/createdAt/noteLook/starred entries that were
@@ -571,6 +592,7 @@ export async function purgeExpiredTrash(maxAgeMs: number = TRASH_MAX_AGE_MS): Pr
           await remove(fullPath(trashPath), { baseDir: BASE_DIR });
           await deleteSketch(trashPath);
           await deleteStudyItems(trashPath);
+          await deleteCollabAcl(trashPath);
         }
       } catch {
         // Already gone from disk somehow - still drop its meta entry below.
@@ -702,6 +724,7 @@ export async function renameEntry(
     if (!isFolder) {
       await relocateSketch(path, newPath);
       await relocateStudyItems(path, newPath);
+      await relocateCollab(path, newPath);
     }
 
     return newPath;
@@ -737,6 +760,7 @@ export async function moveEntry(path: string, targetParentPath: string): Promise
     if (path.endsWith(NOTE_EXTENSION)) {
       await relocateSketch(path, newPath);
       await relocateStudyItems(path, newPath);
+      await relocateCollab(path, newPath);
     }
 
     return newPath;
@@ -823,6 +847,49 @@ async function relocateStudyItems(oldNotePath: string, newNotePath: string): Pro
   const newStudyPath = studyPathFor(newNotePath);
   await mkdir(fullPath(parentOf(newStudyPath)), { baseDir: BASE_DIR, recursive: true });
   await rename(oldStudyPath, fullPath(newStudyPath), {
+    oldPathBaseDir: BASE_DIR,
+    newPathBaseDir: BASE_DIR,
+  });
+}
+
+/** Reads a note's sharing/permissions state, or null if it has never been shared - see
+ * CollabAcl in types.ts. Business logic (create-if-missing, grant/revoke/lock) lives in
+ * src/collab/acl.ts, which calls this and writeCollabAcl as its storage layer. */
+export async function readCollabAcl(notePath: string): Promise<CollabAcl | null> {
+  try {
+    const raw = await readTextFile(fullPath(collabPathFor(notePath)), { baseDir: BASE_DIR });
+    return JSON.parse(raw) as CollabAcl;
+  } catch {
+    return null;
+  }
+}
+
+/** Persists a note's sharing/permissions state to its sidecar file. */
+export async function writeCollabAcl(notePath: string, acl: CollabAcl): Promise<void> {
+  const relPath = collabPathFor(notePath);
+  await mkdir(fullPath(parentOf(relPath)), { baseDir: BASE_DIR, recursive: true });
+  await writeTextFile(fullPath(relPath), JSON.stringify(acl, null, 2), { baseDir: BASE_DIR });
+}
+
+/** Removes a note's sharing sidecar, if any - permanent deletion only (deleteForever/expired
+ * trash), never called on a plain soft-delete since relocateCollab already moves it to trash
+ * alongside the note. */
+export async function deleteCollabAcl(notePath: string): Promise<void> {
+  try {
+    await remove(fullPath(collabPathFor(notePath)), { baseDir: BASE_DIR });
+  } catch {
+    // No collab sidecar existed for this note - nothing to clean up.
+  }
+}
+
+/** Moves a note's sharing sidecar (if any) alongside a rename/move of the note itself. */
+async function relocateCollab(oldNotePath: string, newNotePath: string): Promise<void> {
+  const oldCollabPath = fullPath(collabPathFor(oldNotePath));
+  const collabExists = await exists(oldCollabPath, { baseDir: BASE_DIR });
+  if (!collabExists) return;
+  const newCollabPath = collabPathFor(newNotePath);
+  await mkdir(fullPath(parentOf(newCollabPath)), { baseDir: BASE_DIR, recursive: true });
+  await rename(oldCollabPath, fullPath(newCollabPath), {
     oldPathBaseDir: BASE_DIR,
     newPathBaseDir: BASE_DIR,
   });

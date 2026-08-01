@@ -3,6 +3,7 @@ import type { PluginView } from "@milkdown/kit/prose/state";
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
+import { isInlineOnlyChange } from "./docChangeScope";
 import { readAttachment, writeAttachment } from "../utils/fsNotes";
 import type { VoiceNoteAttrs } from "./voiceNoteSchemaExtensions";
 import { VoiceRecording, appendWav, formatDuration } from "./voiceRecording";
@@ -164,27 +165,54 @@ class VoiceNoteGripsView implements PluginView {
   // result. Coalescing to one pass per animation frame (see onWindowResize) throws away nothing
   // visible, since only the last-known size before each paint ever mattered anyway.
   private resizeRaf: number | null = null;
+  // Which entries' lines are currently scrolled into view (kept in sync by visibilityObserver
+  // below). repositionAll only remeasures entries in this set - a line that's scrolled off
+  // screen can't have moved relative to the *viewport* just because the user typed somewhere
+  // else, so there's nothing to gain (and, on a long note, real cost - see repositionAll) from
+  // reading its rect on every keystroke. It gets remeasured for free the moment it scrolls back
+  // into range, just ahead of becoming visible (see the rootMargin below).
+  private visibleEls = new Set<HTMLElement>();
+  private visibilityObserver: IntersectionObserver;
 
   constructor(view: EditorView, notePath: string, enabled: boolean) {
     this.view = view;
     this.notePath = notePath;
     this.enabled = enabled;
+    this.hoverRoot = this.view.dom.closest<HTMLElement>(".prose-note") ?? this.view.dom;
+    this.visibilityObserver = new IntersectionObserver(
+      (observed) => {
+        for (const observation of observed) {
+          const el = observation.target as HTMLElement;
+          if (observation.isIntersecting) this.visibleEls.add(el);
+          else this.visibleEls.delete(el);
+        }
+        this.repositionAll();
+      },
+      { root: this.hoverRoot, rootMargin: "400px 0px" },
+    );
     this.sync();
     window.addEventListener("resize", this.onWindowResize);
-    this.hoverRoot = this.view.dom.closest<HTMLElement>(".prose-note") ?? this.view.dom;
     this.hoverRoot.addEventListener("mousemove", this.onDomMouseMove);
     this.hoverRoot.addEventListener("mouseleave", this.onDomMouseLeave);
   }
 
   update(view: EditorView, prevState: EditorView["state"]) {
     this.view = view;
-    if (view.state.doc !== prevState.doc) this.sync();
-    else this.repositionAll();
+    // Every keystroke produces a new (immutable) doc object, so `doc !== prevState.doc` alone
+    // is true on every edit regardless of note size - isInlineOnlyChange narrows that down to
+    // only the edits that could actually add/remove/re-type an eligible line, so continuous
+    // typing in a large note doesn't re-walk the whole document on every character.
+    if (view.state.doc !== prevState.doc && !isInlineOnlyChange(prevState.doc, view.state.doc)) {
+      this.sync();
+    } else {
+      this.repositionAll();
+    }
   }
 
   destroy() {
     this.cancelRecording();
     this.resizeObserver.disconnect();
+    this.visibilityObserver.disconnect();
     window.removeEventListener("resize", this.onWindowResize);
     if (this.resizeRaf !== null) cancelAnimationFrame(this.resizeRaf);
     this.hoverRoot?.removeEventListener("mousemove", this.onDomMouseMove);
@@ -245,17 +273,22 @@ class VoiceNoteGripsView implements PluginView {
         if (this.recording?.entryEl === el) this.cancelRecording();
         entry.control.remove();
         this.resizeObserver.unobserve(el);
+        this.visibilityObserver.unobserve(el);
+        this.visibleEls.delete(el);
         this.entries.delete(el);
         if (this.hovered === el) this.hovered = null;
       }
     }
 
+    const newEntries: LineEntry[] = [];
     current.forEach((info, el) => {
       let entry = this.entries.get(el);
       if (!entry) {
         entry = this.createEntry(el, info.type);
         this.entries.set(el, entry);
         this.resizeObserver.observe(el);
+        this.visibilityObserver.observe(el);
+        newEntries.push(entry);
       } else {
         entry.type = info.type;
       }
@@ -263,7 +296,33 @@ class VoiceNoteGripsView implements PluginView {
       this.renderEntry(entry);
     });
 
+    // The visibilityObserver above only reports in on its own (async) schedule, so a
+    // brand-new entry (e.g. from pressing Enter) isn't in visibleEls yet and repositionAll
+    // below would skip it, leaving its control sitting at the host's top-left corner (its
+    // unset default position) for a frame. There are only ever as many new entries as lines
+    // just added by this one edit - almost always 0 or 1 - so measuring them individually
+    // here stays cheap regardless of how long the rest of the note is.
+    if (newEntries.length > 0 && this.host) {
+      const hostRect = this.host.getBoundingClientRect();
+      newEntries.forEach((entry) => {
+        const { top, left } = this.measureEntry(entry, hostRect);
+        entry.control.style.top = `${top}px`;
+        entry.control.style.left = `${left}px`;
+      });
+    }
+
     this.repositionAll();
+  }
+
+  private measureEntry(entry: LineEntry, hostRect: DOMRect): { top: number; left: number } {
+    const rect = entry.el.getBoundingClientRect();
+    entry.top = rect.top;
+    entry.bottom = rect.bottom;
+    const lineRect = this.firstLineRect(entry.el);
+    return {
+      top: lineRect.top - hostRect.top + (lineRect.height - 22) / 2,
+      left: rect.right - hostRect.left + 6,
+    };
   }
 
   private repositionAll() {
@@ -272,23 +331,20 @@ class VoiceNoteGripsView implements PluginView {
     // Two passes, not one: reading a rect (getBoundingClientRect/getClientRects) right after
     // writing another entry's control.style.top/left forces the browser to synchronously
     // recompute layout before it can answer, since it can no longer trust its last-known
-    // geometry. Interleaved like that, this loop cost one forced reflow per eligible line in the
-    // *entire* note (scanEligibleLines walks the whole doc, not just what's scrolled into view) -
-    // on every single window-resize tick during a live drag. `.voice-line-control` is
+    // geometry. Interleaved like that, this loop would cost one forced reflow per measured
+    // entry on every single window-resize tick during a live drag. `.voice-line-control` is
     // `position: absolute` (see index.css), so it never affects any entry's own layout - splitting
     // into a read pass then a write pass is safe and collapses all those reflows into effectively
     // one for the whole batch.
+    //
+    // Only entries currently scrolled into view (visibleEls, kept live by visibilityObserver)
+    // are remeasured - a line the user can't see hasn't moved relative to the viewport just
+    // because they typed somewhere else, so this stays bounded by how much of the note is on
+    // screen rather than by the note's total length.
     const measurements: { entry: LineEntry; top: number; left: number }[] = [];
-    this.entries.forEach((entry) => {
-      const rect = entry.el.getBoundingClientRect();
-      entry.top = rect.top;
-      entry.bottom = rect.bottom;
-      const lineRect = this.firstLineRect(entry.el);
-      measurements.push({
-        entry,
-        top: lineRect.top - hostRect.top + (lineRect.height - 22) / 2,
-        left: rect.right - hostRect.left + 6,
-      });
+    this.entries.forEach((entry, el) => {
+      if (!this.visibleEls.has(el)) return;
+      measurements.push({ entry, ...this.measureEntry(entry, hostRect) });
     });
     measurements.forEach(({ entry, top, left }) => {
       entry.control.style.top = `${top}px`;

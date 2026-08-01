@@ -14,6 +14,7 @@ import {
   Square,
   Star,
   Trash2,
+  UserPlus,
 } from "lucide-react";
 import { flattenFolders, flattenNotes, type TrashItem } from "../utils/fsNotes";
 import { searchNotes, type SearchSnippet } from "../utils/searchIndex";
@@ -52,6 +53,9 @@ interface SidebarProps {
    * open, so notes can be created without leaving the editor. */
   onPromptNewNote: (parentPath: string) => void;
   onPromptNewFolder: (parentPath: string) => void;
+  /** Opens the dialog for redeeming an invite someone else sent - a vault-level action (unlike
+   * Share, which is per-note) since it's how a note gets added to your view in the first place. */
+  onJoinSharedNote: () => void;
   onRename: (path: string, isFolder: boolean, newTitle: string) => void;
   /** Soft-deletes immediately - no confirmation, since Recently Deleted is the undo. */
   onDeleteEntry: (path: string, isFolder: boolean) => void;
@@ -89,6 +93,7 @@ export function Sidebar({
   onDuplicateNote,
   onPromptNewNote,
   onPromptNewFolder,
+  onJoinSharedNote,
   onRename,
   onDeleteEntry,
   onMove,
@@ -399,6 +404,15 @@ export function Sidebar({
                     <>
                       <div className="flex items-center gap-1 px-1">
                         <p className="text-tertiary flex-1 text-xs font-semibold uppercase tracking-wide">All Notes</p>
+                        <button
+                          type="button"
+                          onClick={onJoinSharedNote}
+                          className="btn-ghost h-5 w-5"
+                          title="Join a shared note"
+                          aria-label="Join a shared note"
+                        >
+                          <UserPlus size={12} />
+                        </button>
                         <button
                           type="button"
                           onClick={() => onPromptNewFolder("")}
