@@ -14,7 +14,7 @@ import {
   Square,
   Star,
   Trash2,
-  UserPlus,
+  Users,
 } from "lucide-react";
 import { flattenFolders, flattenNotes, type TrashItem } from "../utils/fsNotes";
 import { searchNotes, type SearchSnippet } from "../utils/searchIndex";
@@ -23,8 +23,10 @@ import { FOLDER_COLOR_HEX } from "../utils/folderColors";
 import { buildDayIndex, dayKey } from "../utils/dayIndex";
 import { getEventsForDay, type CalendarEvent } from "../utils/calendarEvents";
 import { formatRelativeTime } from "../utils/relativeTime";
+import type { SharedNoteSummary } from "../collab/acl";
 import { EntryMenu, NoteTree, RenameInput } from "./NoteTree";
-import type { BrowseFilter, FolderEntry, TreeEntry } from "../types";
+import { SharedNotesList } from "./SharedNotesList";
+import type { BrowseFilter, FolderEntry, GuestJoinedNote, TreeEntry } from "../types";
 
 interface SidebarProps {
   tree: TreeEntry[];
@@ -56,6 +58,17 @@ interface SidebarProps {
   /** Opens the dialog for redeeming an invite someone else sent - a vault-level action (unlike
    * Share, which is per-note) since it's how a note gets added to your view in the first place. */
   onJoinSharedNote: () => void;
+  /** Notes this device owns that have ever been shared, and notes this device has joined as a
+   * guest - see App.tsx's ownedSharedNotes/guestNotes state, for the Shared Notes nav section. */
+  ownedSharedNotes: SharedNoteSummary[];
+  guestNotes: GuestJoinedNote[];
+  /** Live status of each pending guest request - see App.tsx's guestRequestPhases. */
+  guestRequestPhases: Record<string, "connecting" | "acknowledged" | "stalled">;
+  onOpenSharedNote: (noteId: string) => void;
+  onDismissGuestNote: (noteId: string) => void;
+  onRetryGuestRequest: (noteId: string) => void;
+  onUnshareOwned: (notePath: string) => void;
+  activeSharedNoteId: string | null;
   onRename: (path: string, isFolder: boolean, newTitle: string) => void;
   /** Soft-deletes immediately - no confirmation, since Recently Deleted is the undo. */
   onDeleteEntry: (path: string, isFolder: boolean) => void;
@@ -94,6 +107,14 @@ export function Sidebar({
   onPromptNewNote,
   onPromptNewFolder,
   onJoinSharedNote,
+  ownedSharedNotes,
+  guestNotes,
+  guestRequestPhases,
+  onOpenSharedNote,
+  onDismissGuestNote,
+  onRetryGuestRequest,
+  onUnshareOwned,
+  activeSharedNoteId,
   onRename,
   onDeleteEntry,
   onMove,
@@ -158,6 +179,7 @@ export function Sidebar({
 
   const starredCount = useMemo(() => flattenNotes(tree).filter((n) => n.starred).length, [tree]);
   const starredNotes = useMemo(() => flattenNotes(tree).filter((n) => n.starred), [tree]);
+  const sharedCount = ownedSharedNotes.length + guestNotes.filter((n) => n.status !== "expired").length;
 
   /** Nav filter shown as active - while a note is open this is the file tree's own local
    * filter, since Home's `filter` is invisible while browsing is paused. */
@@ -320,38 +342,33 @@ export function Sidebar({
 
         {!isSearching && (
           <div className="flex flex-col gap-0.5 px-2 pt-1.5">
-            <button
-              type="button"
+            <SidebarNavButton
+              icon={<Files size={14} className="shrink-0" />}
+              label="All Notes"
+              active={navFilter === "all"}
               onClick={() => selectSidebarFilter("all")}
-              className={`flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-medium transition-colors duration-150 ${
-                navFilter === "all" ? "bg-accent-soft text-accent" : "text-secondary hover:bg-surface-hover hover:text-primary"
-              }`}
-            >
-              <Files size={14} className="shrink-0" />
-              All Notes
-            </button>
-            <button
-              type="button"
+            />
+            <SidebarNavButton
+              icon={<Star size={14} className="shrink-0" />}
+              label="Starred"
+              count={starredCount}
+              active={navFilter === "starred"}
               onClick={() => selectSidebarFilter("starred")}
-              className={`flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-medium transition-colors duration-150 ${
-                navFilter === "starred" ? "bg-accent-soft text-accent" : "text-secondary hover:bg-surface-hover hover:text-primary"
-              }`}
-            >
-              <Star size={14} className="shrink-0" />
-              Starred
-              <span className="text-tertiary ml-auto text-xs tabular-nums">{starredCount}</span>
-            </button>
-            <button
-              type="button"
+            />
+            <SidebarNavButton
+              icon={<Users size={14} className="shrink-0" />}
+              label="Shared Notes"
+              count={sharedCount}
+              active={navFilter === "shared"}
+              onClick={() => selectSidebarFilter("shared")}
+            />
+            <SidebarNavButton
+              icon={<Trash2 size={14} className="shrink-0" />}
+              label="Recently Deleted"
+              count={trash.length}
+              active={navFilter === "trash"}
               onClick={() => selectSidebarFilter("trash")}
-              className={`flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-medium transition-colors duration-150 ${
-                navFilter === "trash" ? "bg-accent-soft text-accent" : "text-secondary hover:bg-surface-hover hover:text-primary"
-              }`}
-            >
-              <Trash2 size={14} className="shrink-0" />
-              Recently Deleted
-              <span className="text-tertiary ml-auto text-xs tabular-nums">{trash.length}</span>
-            </button>
+            />
           </div>
         )}
 
@@ -404,15 +421,6 @@ export function Sidebar({
                     <>
                       <div className="flex items-center gap-1 px-1">
                         <p className="text-tertiary flex-1 text-xs font-semibold uppercase tracking-wide">All Notes</p>
-                        <button
-                          type="button"
-                          onClick={onJoinSharedNote}
-                          className="btn-ghost h-5 w-5"
-                          title="Join a shared note"
-                          aria-label="Join a shared note"
-                        >
-                          <UserPlus size={12} />
-                        </button>
                         <button
                           type="button"
                           onClick={() => onPromptNewFolder("")}
@@ -468,6 +476,24 @@ export function Sidebar({
                           ))}
                         </div>
                       )}
+                    </>
+                  )}
+
+                  {navFilter === "shared" && (
+                    <>
+                      <p className="text-tertiary px-1 text-xs font-semibold uppercase tracking-wide">Shared Notes</p>
+                      <SharedNotesList
+                        ownedSharedNotes={ownedSharedNotes}
+                        guestNotes={guestNotes}
+                        requestPhases={guestRequestPhases}
+                        onOpenOwned={onOpenNote}
+                        onOpenGuest={onOpenSharedNote}
+                        onJoinSharedNote={onJoinSharedNote}
+                        onDismissGuestNote={onDismissGuestNote}
+                        onRetryGuestRequest={onRetryGuestRequest}
+                        onUnshareOwned={onUnshareOwned}
+                        activeSharedNoteId={activeSharedNoteId}
+                      />
                     </>
                   )}
 
@@ -642,6 +668,36 @@ export function Sidebar({
         )}
       </nav>
     </>
+  );
+}
+
+/** One row in the top nav (All Notes/Starred/Shared Notes/Recently Deleted) - shared so a 4th
+ * (or 5th) entry doesn't mean copy-pasting another hand-built button block. */
+function SidebarNavButton({
+  icon,
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-medium transition-colors duration-150 ${
+        active ? "bg-accent-soft text-accent" : "text-secondary hover:bg-surface-hover hover:text-primary"
+      }`}
+    >
+      {icon}
+      {label}
+      {count !== undefined && <span className="text-tertiary ml-auto text-xs tabular-nums">{count}</span>}
+    </button>
   );
 }
 

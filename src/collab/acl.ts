@@ -1,4 +1,4 @@
-import { flattenNotes, listNoteTree, readCollabAcl, writeCollabAcl } from "../utils/fsNotes";
+import { deleteCollabAcl, flattenNotes, listNoteTree, readCollabAcl, writeCollabAcl } from "../utils/fsNotes";
 import type { CollabAcl, CollabRole, Collaborator } from "../types";
 
 /**
@@ -116,6 +116,15 @@ export function canEdit(acl: CollabAcl, pubKey: string): boolean {
 export function canView(acl: CollabAcl, pubKey: string): boolean {
   const collaborator = acl.collaborators.find((c) => c.pubKey === pubKey);
   return collaborator?.status === "active";
+}
+
+/** Removes a note's sharing sidecar entirely - for the "Shared by you" list's cleanup action,
+ * when an invite was created but never redeemed (so the sidecar exists with zero collaborators)
+ * and the owner just wants it gone rather than leaving an empty share lingering forever. Not
+ * the same as revoking - this forgets the note was ever shared, whereas revoke keeps an audit
+ * trail. Callers should only offer this when there are no active collaborators to disrupt. */
+export async function unshareNote(notePath: string): Promise<void> {
+  await deleteCollabAcl(notePath);
 }
 
 /** One note somewhere in the vault that has ever been shared, for the Settings panel's

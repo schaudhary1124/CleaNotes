@@ -90,7 +90,7 @@ export interface HostedSession {
   yXmlFragment: Y.XmlFragment;
   /** Live cursors/selections and presence - bound into the owner's own editor the same way as
    * yXmlFragment, and also the single source of truth the UI reads to show "who's here" (see
-   * usePresence in Header.tsx/JoinSharedNoteDialog.tsx) rather than a separately-tracked list. */
+   * usePresence in Header.tsx/SharedNoteView.tsx) rather than a separately-tracked list. */
   awareness: Awareness;
   /** Re-reads the ACL immediately (bypassing the usual ~2s cache) and pushes a live "state" or
    * "revoked" notice to any connected peer whose access actually changed - call right after a

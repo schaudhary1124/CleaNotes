@@ -12,6 +12,8 @@ import { NewItemDialog } from "./components/NewItemDialog";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ShareDialog } from "./components/ShareDialog";
 import { JoinSharedNoteDialog } from "./components/JoinSharedNoteDialog";
+import { SharedNoteView } from "./components/SharedNoteView";
+import { IncomingShareRequestBanner } from "./components/IncomingShareRequestBanner";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { TabStrip } from "./components/TabStrip";
 import { useAppUpdater } from "./hooks/useAppUpdater";
@@ -46,10 +48,19 @@ import {
   type MergeTabPayload,
 } from "./utils/windowInstance";
 import { broadcastNoteSaved, listenForNoteSaved } from "./utils/noteSync";
-import { getAcl, setLocked } from "./collab/acl";
-import { loadOrCreateIdentity } from "./collab/identity";
-import { hostSession, type HostedSession } from "./collab/yjsBridge";
+import { getAcl, grantCollaborator, listSharedNotes, setLocked, unshareNote, type SharedNoteSummary } from "./collab/acl";
+import { loadOrCreateIdentity, type DeviceIdentity } from "./collab/identity";
+import { hostInvite, redeemInvite, type HostHandle, type PairingDecision } from "./collab/signaling";
+import type { InvitePayload } from "./collab/invite";
+import { hostSession, joinSession, type HostedSession, type JoinedSession } from "./collab/yjsBridge";
 import { usePresence } from "./collab/usePresence";
+import {
+  listOwnerInvites,
+  listGuestNotes,
+  removeGuestNote,
+  removeOwnerInvite,
+  updateGuestNoteStatus,
+} from "./collab/sharedNotesStore";
 import type { NoteLinkTarget } from "./milkdown/noteLinkHref";
 import { loadMainTabSession, saveMainTabSession } from "./utils/tabSession";
 import {
@@ -68,9 +79,22 @@ import {
   syncBacklinksIndex,
   updateNoteInBacklinksIndex,
 } from "./utils/backlinksIndex";
-import type { AppMode, AppSettings, BrowseFilter, TreeEntry } from "./types";
+import type { AppMode, AppSettings, BrowseFilter, GuestJoinedNote, OwnerPendingInvite, TreeEntry } from "./types";
 
 type BootStatus = "loading" | "ready" | "error";
+
+/** A join request that just arrived for one of this device's own pending invites - surfaced as
+ * a global banner (see IncomingShareRequestBanner) rather than trapped inside ShareDialog, since
+ * invites now live up to 24h and the owner won't have that dialog open the whole time. */
+interface IncomingShareRequest {
+  notePath: string;
+  noteTitle: string;
+  role: OwnerPendingInvite["role"];
+  secret: string;
+  guestPubKey: string;
+  displayName: string;
+  resolve: (decision: PairingDecision) => void;
+}
 
 /** Recently Deleted's "Delete forever" is the only remaining destructive action that still
  * needs confirmation - normal delete is instant now that Recently Deleted is the undo path.
@@ -135,7 +159,10 @@ function App() {
   // (a heading or a notePin - see NoteLinkTarget), consumed by the Editor mount that opens it
   // (see scrollToAnchorId below), then cleared.
   const [pendingScrollAnchor, setPendingScrollAnchor] = useState<{ path: string; anchorId: string } | null>(null);
-  const [view, setView] = useState<"home" | "note">("home");
+  const [view, setView] = useState<"home" | "note" | "shared">("home");
+  // The guest note currently open in the "shared" view - a synthetic id (GuestJoinedNote.noteId),
+  // not a vault path, since a guest note has no local file - see the "shared" view render branch.
+  const [activeSharedNoteId, setActiveSharedNoteId] = useState<string | null>(null);
   const [browseFilter, setBrowseFilter] = useState<BrowseFilter>("all");
   const [browseFolder, setBrowseFolder] = useState("");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -146,13 +173,21 @@ function App() {
   const [newItemDialog, setNewItemDialog] = useState<NewItemDialogState | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [joinSharedNoteOpen, setJoinSharedNoteOpen] = useState(false);
-  // Bumped by ShareDialog after granting/revoking a collaborator, so the effect below re-checks
-  // whether the active note should start (or could stop) hosting a live session - see its own
-  // comment for why this, rather than the ACL object itself, is what it depends on.
+  // Bumped after granting/revoking a collaborator, or creating/resolving an invite, so the
+  // supervisor effects below re-derive who should currently be hosted/listened for - see their
+  // own comments for why this, rather than the ACL/store objects themselves, is what they depend on.
   const [collabVersion, setCollabVersion] = useState(0);
-  const [hasActiveCollaborators, setHasActiveCollaborators] = useState(false);
   const [noteLocked, setNoteLocked] = useState(false);
-  const [activeCollabSession, setActiveCollabSession] = useState<HostedSession | null>(null);
+  const [identity, setIdentity] = useState<DeviceIdentity | null>(null);
+  // Every owned note with a `.collab.json` sidecar (shared at least once), refreshed by the
+  // hosted-sessions supervisor below - the source for the sidebar's Shared Notes section.
+  const [ownedSharedNotes, setOwnedSharedNotes] = useState<SharedNoteSummary[]>([]);
+  // This device's own guest-side record of notes it has redeemed an invite for - see
+  // sharedNotesStore.ts. Refreshed by the guest invite supervisor below.
+  const [guestNotes, setGuestNotes] = useState<GuestJoinedNote[]>([]);
+  // A join request that just arrived for one of this device's invites, awaiting Allow/Deny -
+  // see IncomingShareRequestBanner.
+  const [incomingShareRequest, setIncomingShareRequest] = useState<IncomingShareRequest | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
@@ -388,6 +423,7 @@ function App() {
 
   const handleBack = useCallback(async () => {
     await flushActiveNote();
+    setActiveSharedNoteId(null);
     setView("home");
   }, [flushActiveNote]);
 
@@ -849,62 +885,103 @@ function App() {
   // Every note in the vault, for the editor's "link to a note" picker - not just the active one.
   const allNotes = useMemo(() => flattenNotes(tree), [tree]);
 
-  // Whether the active note currently has anyone actively granted access - re-checked whenever
-  // the active note changes or ShareDialog bumps collabVersion after a grant/revoke. Kept as its
-  // own boolean (rather than having the hosting effect below read the ACL directly) so that
-  // effect only restarts the session on an actual "should we be hosting at all" flip, not on
-  // every unrelated ACL tweak (a role change or an additional grant to an already-active session
-  // is instead picked up by hostSession's own internal ACL polling - see yjsBridge.ts).
+  // This device's collaboration identity (loaded/generated once, from the OS keychain) - needed
+  // by every supervisor effect below, not just the Share/Join dialogs, now that hosting and
+  // pairing both run at the App level independent of any dialog being open.
+  useEffect(() => {
+    void loadOrCreateIdentity().then(setIdentity);
+  }, []);
+
+  // The active note's lock state, for Header's lock toggle - re-checked whenever the active note
+  // changes or collabVersion bumps after a grant/revoke/lock action elsewhere.
   useEffect(() => {
     if (view !== "note" || !activeNote) {
-      setHasActiveCollaborators(false);
       setNoteLocked(false);
       return;
     }
     let cancelled = false;
     void getAcl(activeNote.path).then((acl) => {
-      if (cancelled) return;
-      setHasActiveCollaborators(!!acl?.collaborators.some((c) => c.status === "active"));
-      setNoteLocked(!!acl?.locked);
+      if (!cancelled) setNoteLocked(!!acl?.locked);
     });
     return () => {
       cancelled = true;
     };
   }, [view, activeNote, collabVersion]);
 
-  // Starts hosting the moment the open note has any active collaborator, and tears the session
-  // down on cleanup (note closed/switched, or the last collaborator revoked) - "as long as the
-  // note is open and the device is on" is the whole point of the owner-as-server model, so this
-  // deliberately doesn't wait for the Share dialog to be open.
-  useEffect(() => {
-    if (!hasActiveCollaborators || view !== "note" || !activeNote) {
-      setActiveCollabSession(null);
-      return;
-    }
-    let cancelled = false;
-    let session: HostedSession | null = null;
-    (async () => {
-      try {
-        const identity = await loadOrCreateIdentity();
-        if (cancelled) return;
-        const started = await hostSession(activeNote.path, identity);
-        if (cancelled) {
-          started.close();
-          return;
+  // Ref-held map of every owned note currently being hosted (has >=1 active collaborator),
+  // keyed by note path - not just the currently-focused tab, so a guest can connect any time
+  // this device's app is running rather than only while the owner happens to be looking at that
+  // exact note (this used to be the "connecting" bug's underlying cause on the invite side, and
+  // the same fix applies here so reconnects don't need a fresh invite either - see
+  // JoinSharedNoteDialog.tsx). A ref, not state, since HostedSession objects aren't renderable on
+  // their own; hostedSessionsVersion below is what makes the derived value under it reactive.
+  const hostedSharedSessionsRef = useRef(new Map<string, HostedSession>());
+  const [hostedSessionsVersion, setHostedSessionsVersion] = useState(0);
+  // Guards against two overlapping reconcile passes (e.g. the identity-ready effect and the
+  // collabVersion effect both firing on the same render) each seeing the same path as "not yet
+  // hosted" and starting a duplicate hostSession for it before either awaits far enough to
+  // register itself in hostedSharedSessionsRef.
+  const reconcilingHostedSessionsRef = useRef(false);
+
+  const reconcileHostedSessions = useCallback(async (currentIdentity: DeviceIdentity) => {
+    if (reconcilingHostedSessionsRef.current) return;
+    reconcilingHostedSessionsRef.current = true;
+    try {
+      const shared = await listSharedNotes();
+      setOwnedSharedNotes(shared);
+      const shouldHost = new Set(
+        shared.filter((s) => s.acl.collaborators.some((c) => c.status === "active")).map((s) => s.notePath),
+      );
+      let changed = false;
+      for (const [path, session] of hostedSharedSessionsRef.current) {
+        if (!shouldHost.has(path)) {
+          session.close();
+          hostedSharedSessionsRef.current.delete(path);
+          changed = true;
         }
-        session = started;
-        setActiveCollabSession(started);
-      } catch {
-        // Note stopped being shared, or the identity/keychain call failed - either way there's
-        // nothing to host right now; hasActiveCollaborators's own next poll will reconcile.
       }
-    })();
+      for (const path of shouldHost) {
+        if (hostedSharedSessionsRef.current.has(path)) continue;
+        try {
+          const session = await hostSession(path, currentIdentity);
+          hostedSharedSessionsRef.current.set(path, session);
+          changed = true;
+        } catch {
+          // Transient signaling failure, or the note stopped being shared again mid-await - the
+          // next reconcile (30s poll, or the next collabVersion bump) retries.
+        }
+      }
+      if (changed) setHostedSessionsVersion((v) => v + 1);
+    } finally {
+      reconcilingHostedSessionsRef.current = false;
+    }
+  }, []);
+
+  // Runs once identity is ready, then on a 30s poll (to notice new shares from other windows/
+  // devices without needing an explicit bump) and immediately on every collabVersion bump.
+  useEffect(() => {
+    if (!identity) return;
+    void reconcileHostedSessions(identity);
+    const interval = setInterval(() => void reconcileHostedSessions(identity), 30_000);
+    return () => clearInterval(interval);
+  }, [identity, reconcileHostedSessions]);
+  useEffect(() => {
+    if (identity) void reconcileHostedSessions(identity);
+  }, [collabVersion, identity, reconcileHostedSessions]);
+  useEffect(() => {
     return () => {
-      cancelled = true;
-      session?.close();
-      setActiveCollabSession(null);
+      for (const session of hostedSharedSessionsRef.current.values()) session.close();
     };
-  }, [hasActiveCollaborators, view, activeNote]);
+  }, []);
+
+  /** The live session for whichever note is currently open, if it's an owned note being hosted -
+   * just a reactive lookup into hostedSharedSessionsRef, not its own independent session. */
+  const activeCollabSession = useMemo(
+    () => (activeNote ? (hostedSharedSessionsRef.current.get(activeNote.path) ?? null) : null),
+    // hostedSessionsVersion is the reactivity trigger for the ref-held map above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeNote, hostedSessionsVersion],
+  );
 
   // Who else is currently present on the open note, for Header's avatar row - see usePresence's
   // own comment for why this reads awareness directly rather than App tracking its own list.
@@ -921,6 +998,332 @@ function App() {
     setCollabVersion((v) => v + 1);
     void activeCollabSession?.notifyAclChanged();
   }
+
+  // Ref-held map of every invite this device (as owner) is currently listening for a redemption
+  // of, keyed by secret - a ref, not state, so an unrelated re-render never tears a listener
+  // down and reopens it. This is the fix for the bug where closing ShareDialog (or switching
+  // notes) killed the pairing listener: these now live entirely at the App level, independent
+  // of any dialog, for the invite's full 24h window - see ShareDialog.tsx, which just writes to
+  // sharedNotesStore.ts and reads its "waiting" state back from `ownerPendingInvites` below.
+  const hostedInvitesRef = useRef(new Map<string, HostHandle>());
+  const [ownerPendingInvites, setOwnerPendingInvites] = useState<OwnerPendingInvite[]>([]);
+  // Same overlapping-passes guard as reconcileHostedSessions above - see its comment.
+  const reconcilingOwnerInvitesRef = useRef(false);
+
+  const reconcileOwnerInvites = useCallback(async (currentIdentity: DeviceIdentity) => {
+    if (reconcilingOwnerInvitesRef.current) return;
+    reconcilingOwnerInvitesRef.current = true;
+    try {
+      const pending = listOwnerInvites();
+      setOwnerPendingInvites(pending);
+      const live = new Set(pending.map((i) => i.secret));
+      for (const [secret, handle] of hostedInvitesRef.current) {
+        if (!live.has(secret)) {
+          handle.close();
+          hostedInvitesRef.current.delete(secret);
+        }
+      }
+      for (const invite of pending) {
+        if (hostedInvitesRef.current.has(invite.secret)) continue;
+        const payload: InvitePayload = {
+          v: 1,
+          noteId: invite.noteId,
+          role: invite.role,
+          secret: invite.secret,
+          ownerPubKey: currentIdentity.publicKeyHex,
+          expiresAt: invite.expiresAt,
+        };
+        try {
+          const handle = await hostInvite(
+            payload,
+            currentIdentity,
+            (request) =>
+              new Promise<PairingDecision>((resolve) => {
+                setIncomingShareRequest({
+                  notePath: invite.notePath,
+                  noteTitle: flattenNotes(tree).find((n) => n.path === invite.notePath)?.title ?? invite.notePath,
+                  role: invite.role,
+                  secret: invite.secret,
+                  guestPubKey: request.guestPubKey,
+                  displayName: request.displayName,
+                  resolve,
+                });
+              }),
+            (result) => {
+              // An unconfirmed *grant* is still durably applied (the ACL write already
+              // happened in handleShareRequestDecision below) - the room deliberately stays
+              // open in that one case, listening for the same guest's automatic retry, until
+              // we know for sure their device got the news. A denial has nothing durable to
+              // protect, so it's always cleaned up immediately regardless of delivery.
+              if (result.delivered || !result.approved) {
+                hostedInvitesRef.current.get(invite.secret)?.close();
+                hostedInvitesRef.current.delete(invite.secret);
+                removeOwnerInvite(invite.secret);
+                setOwnerPendingInvites(listOwnerInvites());
+              }
+              if (result.approved) {
+                showToast(
+                  result.delivered
+                    ? "They're now connected to the note."
+                    : "Granted access, but couldn't confirm they're online right now - it'll sync automatically once both devices are online.",
+                );
+              }
+            },
+          );
+          hostedInvitesRef.current.set(invite.secret, handle);
+        } catch {
+          // Couldn't reach the signaling network right now - the next reconcile retries.
+        }
+      }
+    } finally {
+      reconcilingOwnerInvitesRef.current = false;
+    }
+  }, [tree]);
+
+  useEffect(() => {
+    if (!identity) return;
+    void reconcileOwnerInvites(identity);
+    const interval = setInterval(() => void reconcileOwnerInvites(identity), 30_000);
+    return () => clearInterval(interval);
+  }, [identity, reconcileOwnerInvites]);
+  useEffect(() => {
+    if (identity) void reconcileOwnerInvites(identity);
+  }, [collabVersion, identity, reconcileOwnerInvites]);
+  useEffect(() => {
+    return () => {
+      for (const handle of hostedInvitesRef.current.values()) handle.close();
+    };
+  }, []);
+
+  /** Owner's response to an incoming join request from the global banner. For an approval, the
+   * ACL write below is what actually grants access - it happens regardless of whether the
+   * "you're in" message successfully reaches the guest's device right now (see the reconcile
+   * loop's onDelivery above, which is what closes out the invite and reports success/stalled
+   * once we actually know). A denial has nothing durable to confirm, so it's reported
+   * immediately here instead of waiting on delivery. */
+  async function handleShareRequestDecision(approved: boolean) {
+    if (!incomingShareRequest || !identity) return;
+    const request = incomingShareRequest;
+    setIncomingShareRequest(null);
+    if (approved) {
+      await grantCollaborator(request.notePath, identity.publicKeyHex, {
+        pubKey: request.guestPubKey,
+        displayName: request.displayName,
+        role: request.role,
+      });
+      setCollabVersion((v) => v + 1);
+    } else {
+      showToast(`Declined ${request.displayName}'s request to join "${request.noteTitle}".`);
+    }
+    request.resolve(approved ? { approved: true } : { approved: false, reason: "The owner declined this request." });
+  }
+
+  // This device's own guest-side redemption attempts - one in-flight redeemInvite() per
+  // "pending" entry in the store, resumed here (not just from JoinSharedNoteDialog) so it
+  // survives that dialog closing immediately after the link is submitted, or the app restarting
+  // before the owner responds.
+  const guestRedeemInFlightRef = useRef(new Set<string>());
+  const guestRedeemControllersRef = useRef(new Map<string, AbortController>());
+  const guestStallTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // UI-only status per pending request, keyed by noteId - "connecting" until the owner's device
+  // acks the hello (see signaling.ts's "received" message), then "acknowledged"; if no ack
+  // arrives within STALL_TIMEOUT_MS, "stalled" so the sidebar can show a Retry button instead of
+  // a spinner that looks the same whether anyone is even listening. The underlying redeemInvite
+  // call keeps running in the background regardless (up to the invite's full 24h) - "stalled" is
+  // just an honest label, not something that stops the automatic retry-on-reconnect.
+  const [guestRequestPhases, setGuestRequestPhases] = useState<Record<string, "connecting" | "acknowledged" | "stalled">>({});
+  const STALL_TIMEOUT_MS = 12_000;
+
+  const reconcileGuestNotes = useCallback(async (currentIdentity: DeviceIdentity) => {
+    const notes = listGuestNotes();
+    setGuestNotes(notes);
+    for (const note of notes) {
+      if (note.status !== "pending" || guestRedeemInFlightRef.current.has(note.noteId)) continue;
+      guestRedeemInFlightRef.current.add(note.noteId);
+      const controller = new AbortController();
+      guestRedeemControllersRef.current.set(note.noteId, controller);
+      setGuestRequestPhases((phases) => ({ ...phases, [note.noteId]: "connecting" }));
+      const stallTimer = setTimeout(() => {
+        setGuestRequestPhases((phases) =>
+          phases[note.noteId] === "acknowledged" ? phases : { ...phases, [note.noteId]: "stalled" },
+        );
+      }, STALL_TIMEOUT_MS);
+      guestStallTimersRef.current.set(note.noteId, stallTimer);
+
+      const invite: InvitePayload = {
+        v: 1,
+        noteId: note.noteId,
+        role: note.role,
+        secret: note.secret,
+        ownerPubKey: note.ownerPubKey,
+        expiresAt: note.expiresAt,
+      };
+      redeemInvite(
+        invite,
+        currentIdentity,
+        note.displayName,
+        {
+          onAcknowledged: () => {
+            const timer = guestStallTimersRef.current.get(note.noteId);
+            if (timer) clearTimeout(timer);
+            guestStallTimersRef.current.delete(note.noteId);
+            setGuestRequestPhases((phases) => ({ ...phases, [note.noteId]: "acknowledged" }));
+          },
+        },
+        controller.signal,
+      )
+        .then((result) => {
+          if (result.status === "granted") {
+            updateGuestNoteStatus(note.noteId, "active");
+          } else if (result.status === "denied") {
+            removeGuestNote(note.noteId);
+            showToast(result.reason ?? "Your request to join was declined.");
+          }
+          // "timeout" only happens once the invite itself has expired - listGuestNotes()
+          // already flips a lapsed "pending" entry to "expired" on its own next read.
+          // "cancelled" (an explicit Retry) needs no store change - the note is still
+          // "pending" and this same reconcile loop will pick it back up right away.
+          setGuestNotes(listGuestNotes());
+        })
+        .finally(() => {
+          // Guarded by identity so a stale cleanup from an aborted/superseded attempt can't
+          // clobber the bookkeeping of a newer attempt already started for the same note (see
+          // handleRetryGuestRequest, which starts a fresh one before this one's promise settles).
+          if (guestRedeemControllersRef.current.get(note.noteId) !== controller) return;
+          guestRedeemInFlightRef.current.delete(note.noteId);
+          guestRedeemControllersRef.current.delete(note.noteId);
+          const timer = guestStallTimersRef.current.get(note.noteId);
+          if (timer) clearTimeout(timer);
+          guestStallTimersRef.current.delete(note.noteId);
+          setGuestRequestPhases((phases) => {
+            if (!(note.noteId in phases)) return phases;
+            const next = { ...phases };
+            delete next[note.noteId];
+            return next;
+          });
+        });
+    }
+  }, []);
+
+  const refreshGuestNotes = useCallback(() => {
+    if (identity) void reconcileGuestNotes(identity);
+  }, [identity, reconcileGuestNotes]);
+
+  /** Abandons a stalled join request and immediately starts a fresh attempt - the underlying
+   * invite/secret is unchanged (still valid for up to 24h from creation), this just gives up on
+   * the current room-join and tries again from scratch, for cases like a relay hiccup rather
+   * than the owner simply not being online yet (which would resolve on its own once they are). */
+  const handleRetryGuestRequest = useCallback(
+    (noteId: string) => {
+      guestRedeemControllersRef.current.get(noteId)?.abort();
+      guestRedeemInFlightRef.current.delete(noteId);
+      refreshGuestNotes();
+    },
+    [refreshGuestNotes],
+  );
+
+  useEffect(() => {
+    if (!identity) return;
+    void reconcileGuestNotes(identity);
+    const interval = setInterval(() => void reconcileGuestNotes(identity), 15_000);
+    return () => clearInterval(interval);
+  }, [identity, reconcileGuestNotes]);
+
+  // Live session for whichever guest note is currently open in the "shared" view - a separate,
+  // on-demand connection (not part of the supervisor above) since "Live-only" access means this
+  // only needs to exist while the guest is actually looking at the note, not continuously in the
+  // background for every active guest note.
+  const [activeSharedSession, setActiveSharedSession] = useState<JoinedSession | null>(null);
+  const [activeSharedStatus, setActiveSharedStatus] = useState<"connecting" | "connected" | "offline">("connecting");
+  const [activeSharedCanEdit, setActiveSharedCanEdit] = useState(true);
+  // Bumped to retry the connection below after it drops (owner offline, or they just closed
+  // that note) - without this, going "offline" would otherwise be a dead end until the guest
+  // manually navigated away and back, since none of the effect's other deps change on their own.
+  const [sharedReconnectTick, setSharedReconnectTick] = useState(0);
+
+  useEffect(() => {
+    if (view !== "shared" || !activeSharedNoteId || !identity) {
+      setActiveSharedSession(null);
+      return;
+    }
+    const note = guestNotes.find((n) => n.noteId === activeSharedNoteId);
+    if (!note || note.status !== "active") {
+      setActiveSharedSession(null);
+      return;
+    }
+    let cancelled = false;
+    let session: JoinedSession | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const retryLater = () => {
+      if (cancelled) return;
+      setActiveSharedStatus("offline");
+      retryTimer = setTimeout(() => setSharedReconnectTick((t) => t + 1), 10_000);
+    };
+    setActiveSharedStatus("connecting");
+    joinSession(note.noteId, note.ownerPubKey, note.role, identity, note.displayName, {
+      onCanEditChanged: setActiveSharedCanEdit,
+      onEnded: (reason) => {
+        if (reason === "revoked") {
+          removeGuestNote(note.noteId);
+          setGuestNotes(listGuestNotes());
+          showToast("The owner removed your access to this note.");
+          setActiveSharedSession(null);
+        } else {
+          retryLater();
+        }
+      },
+    })
+      .then((started) => {
+        if (cancelled) {
+          started.close();
+          return;
+        }
+        session = started;
+        setActiveSharedSession(started);
+        setActiveSharedStatus("connected");
+        setActiveSharedCanEdit(started.canEdit);
+        // The invite deliberately never carries the note's title (see invite.ts) - fill it in
+        // now that the first sync has actually revealed it, for the sidebar's Shared Notes list.
+        const firstLine = started.yXmlFragment.toString().replace(/<[^>]+>/g, "").trim().slice(0, 80);
+        if (firstLine && firstLine !== note.title) {
+          updateGuestNoteStatus(note.noteId, "active", { title: firstLine });
+          setGuestNotes(listGuestNotes());
+        }
+      })
+      .catch(retryLater);
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      session?.close();
+    };
+    // guestNotes is intentionally excluded - re-triggering this on every guestNotes refresh would
+    // reconnect on every 15s poll; only an actual note/identity/view/retry change should reconnect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, activeSharedNoteId, identity, sharedReconnectTick]);
+
+  /** Opens a guest-side shared note from the sidebar - a dedicated `view`, not a vault tab,
+   * since a guest note has no local file (see JoinSharedNoteDialog.tsx's structural-isolation
+   * comment). Reconnects on its own via the effect above; no fresh invite needed as long as the
+   * owner's app is running (see the hosted-sessions supervisor above). */
+  const handleOpenSharedNote = useCallback(
+    async (noteId: string) => {
+      await flushActiveNote();
+      setActiveSharedNoteId(noteId);
+      setView("shared");
+    },
+    [flushActiveNote],
+  );
+
+  /** Clears a "Shared by you" entry that has zero active collaborators - most commonly an
+   * invite that was created (which is what actually creates the `.collab.json` sidecar) and
+   * then cancelled or left unredeemed, which otherwise lingers forever since cancelling an
+   * invite alone doesn't remove the sidecar - see SharedNotesList.tsx's onUnshareOwned. */
+  const handleUnshareOwnedNote = useCallback(async (notePath: string) => {
+    const invite = listOwnerInvites().find((i) => i.notePath === notePath);
+    if (invite) removeOwnerInvite(invite.secret);
+    await unshareNote(notePath);
+    setCollabVersion((v) => v + 1);
+  }, []);
 
   /** New-note action for the tab strip's "+" button: creates a sibling of the active tab's
    * note, or falls back to the vault root if no note is open. */
@@ -968,7 +1371,7 @@ function App() {
         <ResizeHandles />
 
         <Header
-          view={view}
+          view={view === "note" ? "note" : "home"}
           onBack={handleBack}
           mode={effectiveMode}
           onModeChange={handleModeChange}
@@ -1034,6 +1437,17 @@ function App() {
                 onPromptNewNote={promptNewNote}
                 onPromptNewFolder={promptNewFolder}
                 onJoinSharedNote={() => setJoinSharedNoteOpen(true)}
+                ownedSharedNotes={ownedSharedNotes}
+                guestNotes={guestNotes}
+                guestRequestPhases={guestRequestPhases}
+                onOpenSharedNote={handleOpenSharedNote}
+                onDismissGuestNote={(noteId) => {
+                  removeGuestNote(noteId);
+                  setGuestNotes(listGuestNotes());
+                }}
+                onRetryGuestRequest={handleRetryGuestRequest}
+                onUnshareOwned={(notePath) => void handleUnshareOwnedNote(notePath)}
+                activeSharedNoteId={view === "shared" ? activeSharedNoteId : null}
                 onRename={handleRename}
                 onDeleteEntry={handleDeleteEntry}
                 onMove={handleMove}
@@ -1079,6 +1493,17 @@ function App() {
                     onSetStarred={handleSetStarred}
                     onRestoreFromTrash={handleRestoreFromTrash}
                     onRequestDeleteForever={handleRequestDeleteForever}
+                    ownedSharedNotes={ownedSharedNotes}
+                    guestNotes={guestNotes}
+                    guestRequestPhases={guestRequestPhases}
+                    onOpenSharedNote={handleOpenSharedNote}
+                    onJoinSharedNote={() => setJoinSharedNoteOpen(true)}
+                    onDismissGuestNote={(noteId) => {
+                      removeGuestNote(noteId);
+                      setGuestNotes(listGuestNotes());
+                    }}
+                    onRetryGuestRequest={handleRetryGuestRequest}
+                    onUnshareOwned={(notePath) => void handleUnshareOwnedNote(notePath)}
                   />
                 )}
 
@@ -1128,6 +1553,16 @@ function App() {
                     <StudyView key={activeNote.path} notePath={activeNote.path} />
                   </ErrorBoundary>
                 )}
+
+                {bootStatus === "ready" && view === "shared" && activeSharedNoteId && (
+                  <SharedNoteView
+                    note={guestNotes.find((n) => n.noteId === activeSharedNoteId) ?? null}
+                    session={activeSharedSession}
+                    status={activeSharedStatus}
+                    canEdit={activeSharedCanEdit}
+                    onBack={() => void handleBack()}
+                  />
+                )}
               </main>
             </>
           )}
@@ -1171,6 +1606,7 @@ function App() {
           <ShareDialog
             notePath={activeNote.path}
             noteTitle={activeNote.title}
+            pendingInvite={ownerPendingInvites.find((i) => i.notePath === activeNote.path) ?? null}
             onClose={() => setShareDialogOpen(false)}
             onAclChanged={() => {
               setCollabVersion((v) => v + 1);
@@ -1179,7 +1615,19 @@ function App() {
           />
         )}
 
-        {joinSharedNoteOpen && <JoinSharedNoteDialog onClose={() => setJoinSharedNoteOpen(false)} />}
+        {joinSharedNoteOpen && (
+          <JoinSharedNoteDialog onClose={() => setJoinSharedNoteOpen(false)} onSubmitted={refreshGuestNotes} />
+        )}
+
+        {incomingShareRequest && (
+          <IncomingShareRequestBanner
+            notePath={incomingShareRequest.notePath}
+            noteTitle={incomingShareRequest.noteTitle}
+            role={incomingShareRequest.role}
+            displayName={incomingShareRequest.displayName}
+            onDecision={(approved) => void handleShareRequestDecision(approved)}
+          />
+        )}
 
         {toast && (
           <div className="glass-surface shadow-app-lg animate-fade-in absolute bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl px-4 py-2.5 text-sm">

@@ -1,39 +1,35 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, Eye, Pencil, UserX } from "lucide-react";
 import { getAcl, getOrCreateAcl, grantCollaborator, revokeCollaborator } from "../collab/acl";
 import { loadOrCreateIdentity, type DeviceIdentity } from "../collab/identity";
 import { createInvite, serializeInvite, type InvitePayload } from "../collab/invite";
-import { hostInvite, type HostHandle, type PairingDecision, type PairingRequest } from "../collab/signaling";
-import type { CollabAcl, CollabRole } from "../types";
+import { upsertOwnerInvite, removeOwnerInvite } from "../collab/sharedNotesStore";
+import type { CollabAcl, CollabRole, OwnerPendingInvite } from "../types";
 
 interface ShareDialogProps {
   notePath: string;
   noteTitle: string;
+  /** This device's own pending invite for this note, if any - lifted to App.tsx so the actual
+   * pairing listener survives this dialog closing (see App.tsx's owner-invite supervisor). */
+  pendingInvite: OwnerPendingInvite | null;
   onClose: () => void;
-  /** Called after a grant or revoke succeeds, so the caller can re-check whether the note
-   * should now be hosting (or stop hosting) a live session - see App.tsx's collabVersion. */
+  /** Called after a grant/revoke, or creating/cancelling an invite, so the caller can re-derive
+   * hosting/listening state - see App.tsx's collabVersion. */
   onAclChanged?: () => void;
 }
 
-type IncomingRequest = PairingRequest & { resolve: (decision: PairingDecision) => void };
-
 /**
- * Owner-side sharing UI for a single note - create a single-use invite, approve or deny each
- * redemption attempt inline, and manage/revoke people who already have access. See the collab
- * plan: this is Phase 1's "owner can see/approve/deny" surface, not yet wired to any live
- * document sync (that's Phase 2) - granting access here only sets up who's *allowed* to
- * collaborate once that exists.
+ * Owner-side sharing UI for a single note - create a single-use invite and manage/revoke people
+ * who already have access. Approving or denying an incoming redemption attempt now happens via
+ * the global IncomingShareRequestBanner (see App.tsx) rather than inline here, since an invite
+ * can be redeemed up to 24h later, long after this dialog might be closed.
  */
-export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: ShareDialogProps) {
+export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAclChanged }: ShareDialogProps) {
   const [identity, setIdentity] = useState<DeviceIdentity | null>(null);
   const [acl, setAcl] = useState<CollabAcl | null>(null);
   const [role, setRole] = useState<CollabRole>("viewer");
-  const [pendingInvite, setPendingInvite] = useState<InvitePayload | null>(null);
   const [copied, setCopied] = useState(false);
-  const [incomingRequest, setIncomingRequest] = useState<IncomingRequest | null>(null);
-  const [lastOutcome, setLastOutcome] = useState<string | null>(null);
   const [creatingInvite, setCreatingInvite] = useState(false);
-  const hostHandleRef = useRef<HostHandle | null>(null);
 
   useEffect(() => {
     void loadOrCreateIdentity().then(setIdentity);
@@ -49,13 +45,7 @@ export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: Shar
     return () => {
       cancelled = true;
     };
-  }, [notePath]);
-
-  useEffect(() => {
-    return () => {
-      hostHandleRef.current?.close();
-    };
-  }, []);
+  }, [notePath, pendingInvite]);
 
   async function handleCreateInvite() {
     if (!identity || creatingInvite) return;
@@ -63,51 +53,39 @@ export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: Shar
     try {
       const currentAcl = await getOrCreateAcl(notePath, identity.publicKeyHex);
       setAcl(currentAcl);
-      setLastOutcome(null);
 
       const invite = createInvite(currentAcl.noteId, role, identity.publicKeyHex);
-      setPendingInvite(invite);
-
-      const handle = await hostInvite(invite, identity, (request) => {
-        return new Promise<PairingDecision>((resolve) => {
-          setIncomingRequest({ ...request, resolve });
-        });
+      upsertOwnerInvite({
+        notePath,
+        noteId: invite.noteId,
+        role: invite.role,
+        secret: invite.secret,
+        createdAt: Date.now(),
+        expiresAt: invite.expiresAt,
       });
-      hostHandleRef.current = handle;
+      onAclChanged?.();
     } finally {
       setCreatingInvite(false);
     }
   }
 
   function handleCancelInvite() {
-    hostHandleRef.current?.close();
-    hostHandleRef.current = null;
-    setPendingInvite(null);
+    if (!pendingInvite) return;
+    removeOwnerInvite(pendingInvite.secret);
+    onAclChanged?.();
   }
 
-  async function handleDecision(approved: boolean) {
-    if (!incomingRequest || !pendingInvite || !identity) return;
-    const request = incomingRequest;
-    setIncomingRequest(null);
-
-    if (approved) {
-      const next = await grantCollaborator(notePath, identity.publicKeyHex, {
-        pubKey: request.guestPubKey,
-        displayName: request.displayName,
-        role: pendingInvite.role,
-      });
-      setAcl(next);
-      setLastOutcome(`${request.displayName} now has ${pendingInvite.role} access.`);
-      onAclChanged?.();
-      request.resolve({ approved: true });
-    } else {
-      setLastOutcome(`Declined ${request.displayName}'s request.`);
-      request.resolve({ approved: false, reason: "The owner declined this request." });
-    }
-
-    hostHandleRef.current = null;
-    setPendingInvite(null);
-  }
+  const invitePayload: InvitePayload | null =
+    pendingInvite && identity
+      ? {
+          v: 1,
+          noteId: pendingInvite.noteId,
+          role: pendingInvite.role,
+          secret: pendingInvite.secret,
+          ownerPubKey: identity.publicKeyHex,
+          expiresAt: pendingInvite.expiresAt,
+        }
+      : null;
 
   async function handleRevoke(pubKey: string) {
     const next = await revokeCollaborator(notePath, pubKey);
@@ -123,8 +101,8 @@ export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: Shar
   }
 
   async function handleCopy() {
-    if (!pendingInvite) return;
-    await navigator.clipboard.writeText(serializeInvite(pendingInvite));
+    if (!invitePayload) return;
+    await navigator.clipboard.writeText(serializeInvite(invitePayload));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
@@ -145,39 +123,16 @@ export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: Shar
           nothing else in your vault.
         </p>
 
-        {incomingRequest ? (
-          <div className="border-subtle bg-surface-hover mt-4 rounded-xl border p-3.5">
-            <p className="text-primary text-sm">
-              <span className="font-semibold">{incomingRequest.displayName}</span> wants to join as{" "}
-              <span className="font-semibold">{pendingInvite?.role}</span>.
-            </p>
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => void handleDecision(false)}
-                className="btn-ghost h-8 rounded-lg px-3 text-sm"
-              >
-                Deny
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleDecision(true)}
-                autoFocus
-                className="bg-accent-solid h-8 rounded-lg px-3 text-sm font-medium text-white transition-colors duration-150 hover:brightness-110"
-              >
-                Allow
-              </button>
-            </div>
-          </div>
-        ) : pendingInvite ? (
+        {pendingInvite && invitePayload ? (
           <div className="border-subtle bg-surface-hover mt-4 rounded-xl border p-3.5">
             <p className="text-secondary text-xs">
-              Waiting for someone to open this link · expires {new Date(pendingInvite.expiresAt).toLocaleTimeString()}
+              Waiting for someone to open this link · expires{" "}
+              {new Date(pendingInvite.expiresAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
             </p>
             <div className="mt-2 flex items-center gap-2">
               <input
                 readOnly
-                value={serializeInvite(pendingInvite)}
+                value={serializeInvite(invitePayload)}
                 onFocus={(e) => e.currentTarget.select()}
                 className="border-subtle bg-surface text-secondary h-8 w-full truncate rounded-lg border px-2.5 text-xs"
               />
@@ -211,8 +166,6 @@ export function ShareDialog({ notePath, noteTitle, onClose, onAclChanged }: Shar
             </button>
           </div>
         )}
-
-        {lastOutcome && <p className="text-secondary mt-3 text-xs">{lastOutcome}</p>}
 
         {activeCollaborators.length > 0 && (
           <div className="mt-5">

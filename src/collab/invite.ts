@@ -21,7 +21,7 @@ export interface InvitePayload {
   expiresAt: number;
 }
 
-const INVITE_TTL_MS = 15 * 60 * 1000;
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const SECRET_BYTES = 32;
 const PUBKEY_HEX_LENGTH = 64; // Ed25519 public key: 32 bytes, hex-encoded
 const SECRET_HEX_LENGTH = SECRET_BYTES * 2;
@@ -33,7 +33,7 @@ const INVITE_PREFIX = "cleanotes-invite://";
 
 export class InviteError extends Error {}
 
-/** Creates a fresh invite for `noteId`, expiring in 15 minutes. Callers still need to persist
+/** Creates a fresh invite for `noteId`, expiring in 24 hours. Callers still need to persist
  * nothing here - the invite is stateless; the owner's signaling module is what decides whether
  * to honor a redemption attempt against it (see signaling.ts). */
 export function createInvite(noteId: string, role: CollabRole, ownerPubKey: string): InvitePayload {

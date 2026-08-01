@@ -99,8 +99,19 @@ function proofOfSecret(secret: string): Promise<string> {
 
 type AuthMessage =
   | { type: "hello"; noteId: string; guestPubKey: string; displayName: string; proof: string }
+  // Sent by the owner the moment a valid "hello" arrives, before the human has actually made a
+  // decision - lets the guest show "request sent, waiting for approval" instead of an
+  // ambiguous "connecting" state that looks identical whether anyone is even listening.
+  | { type: "received"; proof: string }
   | { type: "grant"; ownerPubKey: string; noteId: string; role: CollabRole; proof: string; signature: string }
-  | { type: "deny"; proof: string; reason?: string };
+  | { type: "deny"; proof: string; reason?: string }
+  // Sent by the guest the moment it validates a "grant" (or receives a "deny") - the owner
+  // waits briefly for this before deciding whether to report the decision as actually
+  // delivered, so a guest that goes offline mid-handshake doesn't silently look successful.
+  // Signed (unlike "hello"'s bare guestPubKey claim) so a third party who merely knows the
+  // invite secret - not the same thing as controlling guestPubKey's private key - can't spoof
+  // a fake delivery confirmation for someone else's still-pending request.
+  | { type: "joined"; proof: string; guestPubKey: string; signature: string };
 
 export interface PairingRequest {
   guestPubKey: string;
@@ -110,58 +121,136 @@ export interface PairingRequest {
 export type PairingDecision = { approved: true } | { approved: false; reason?: string };
 
 export interface HostHandle {
-  /** Stops listening for redemptions of this invite - call when the Share dialog closes or
-   * the invite expires, so a late/duplicate attempt can't complete a pairing unattended. */
+  /** Stops listening for redemptions of this invite - call when the owner cancels it, the
+   * invite expires, or a delivered decision no longer needs to keep listening for a retry (see
+   * DeliveryResult.delivered). A late/duplicate attempt after this can't complete a pairing
+   * unattended. */
   close(): void;
 }
 
+export interface DeliveryResult {
+  guestPubKey: string;
+  approved: boolean;
+  /** Whether the guest's device confirmed receiving the decision within a few seconds. For an
+   * approval, `false` does NOT mean access wasn't granted - the caller already wrote that to
+   * the ACL before the decision was ever sent (see App.tsx's handleShareRequestDecision); it
+   * only means we couldn't confirm the guest's device got the news *right now*, most commonly
+   * because they went offline around the same moment. The room is deliberately kept open (not
+   * torn down) in that case - see hostInvite's decidedForPubKey below - so the guest's own
+   * automatic retry (their device re-announces itself the moment it's back online; see
+   * redeemInvite/App.tsx's guest supervisor) gets caught and replayed the exact same decision,
+   * without needing a fresh invite or bothering the owner again. */
+  delivered: boolean;
+}
+
+const DELIVERY_ACK_TIMEOUT_MS = 8_000;
+
 /**
- * Owner side: listens for exactly one valid redemption of `invite`, surfacing each distinct
+ * Owner side: listens for valid redemption attempts of `invite`, surfacing the first distinct
  * pairing attempt to `onRequest` (which should show the "X wants to join as Editor" approval UI
- * and resolve once the person responds) and sending back a signed grant or a denial. The first
- * request with a valid proof-of-secret consumes the invite - anyone else who redeems the same
- * link afterward (e.g. a forwarded/leaked link) gets an automatic "already used" denial without
- * bothering the owner again.
+ * and resolve once the person responds) and sending back a signed grant or a denial. A second
+ * "hello" from a *different* guest after that gets an automatic "already used" denial without
+ * bothering the owner again; a second "hello" from the *same* guest (most commonly a retry after
+ * they were briefly offline) instead replays the exact decision that was already made for them,
+ * so an interrupted delivery resolves itself the next time both devices are online, without
+ * re-prompting the owner. Reports the outcome of each delivery attempt via `onDelivery`.
  */
 export async function hostInvite(
   invite: InvitePayload,
   identity: DeviceIdentity,
   onRequest: (request: PairingRequest) => Promise<PairingDecision>,
+  onDelivery?: (result: DeliveryResult) => void,
 ): Promise<HostHandle> {
   const { roomId, password } = await deriveInviteRoom(invite.secret);
   const room: Room = joinTrysteroRoom(password, roomId);
   const auth = room.makeAction<AuthMessage>("cleanotes-auth");
   const expectedProof = await proofOfSecret(invite.secret);
 
-  let consumed = false;
+  let decidedForPubKey: string | null = null;
+  let decidedResponse: AuthMessage | null = null;
+  const ackResolvers = new Map<string, () => void>();
+  // Tracks each guest's most recent peerId (Trystero can hand out a new one on reconnect), so a
+  // replayed decision after a retry goes to their *current* connection, not a stale one from
+  // their first, since-dropped attempt.
+  const latestPeerId = new Map<string, string>();
+
+  function waitForDeliveryAck(guestPubKey: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        ackResolvers.delete(guestPubKey);
+        resolve(false);
+      }, DELIVERY_ACK_TIMEOUT_MS);
+      ackResolvers.set(guestPubKey, () => {
+        clearTimeout(timer);
+        ackResolvers.delete(guestPubKey);
+        resolve(true);
+      });
+    });
+  }
 
   auth.onMessage = async (message, { peerId }) => {
+    if (message.type === "joined") {
+      if (message.proof !== expectedProof) return;
+      let validSignature = false;
+      try {
+        validSignature = verifySignature(
+          fromHex(message.signature),
+          new TextEncoder().encode(`joined:${invite.noteId}:${message.guestPubKey}`),
+          message.guestPubKey,
+        );
+      } catch {
+        validSignature = false;
+      }
+      // Ignore anything that isn't actually signed by the guestPubKey it claims - otherwise
+      // anyone who merely knows the invite secret (not the same as controlling that private
+      // key) could spoof a fake "delivered" ack for someone else's still-pending decision.
+      if (validSignature) ackResolvers.get(message.guestPubKey)?.();
+      return;
+    }
     if (message.type !== "hello") return;
     if (message.proof !== expectedProof || message.noteId !== invite.noteId) return; // not this invite - stay silent, don't help a guesser
 
-    if (consumed) {
+    latestPeerId.set(message.guestPubKey, peerId);
+    await auth.send({ type: "received", proof: expectedProof }, { target: peerId });
+
+    if (decidedForPubKey === message.guestPubKey) {
+      if (decidedResponse) {
+        const response = decidedResponse;
+        await auth.send(response, { target: peerId });
+        const delivered = await waitForDeliveryAck(message.guestPubKey);
+        onDelivery?.({ guestPubKey: message.guestPubKey, approved: response.type === "grant", delivered });
+      }
+      // else: the human decision is still pending from this guest's first "hello" - nothing
+      // more to do here, they'll get it once onRequest resolves below.
+      return;
+    }
+    if (decidedForPubKey) {
       await auth.send({ type: "deny", proof: expectedProof, reason: "This invite has already been used." }, { target: peerId });
       return;
     }
-    consumed = true; // set before awaiting the human decision below, so a concurrent second hello can't also slip through
+    decidedForPubKey = message.guestPubKey; // set before awaiting the human decision, so a concurrent second hello can't also slip through
 
     try {
       const decision = await onRequest({ guestPubKey: message.guestPubKey, displayName: message.displayName });
-      if (decision.approved) {
-        const signature = toHex(
-          sign(identity, new TextEncoder().encode(`grant:${invite.noteId}:${message.guestPubKey}`)),
-        );
-        await auth.send(
-          { type: "grant", ownerPubKey: identity.publicKeyHex, noteId: invite.noteId, role: invite.role, proof: expectedProof, signature },
-          { target: peerId },
-        );
-      } else {
-        await auth.send({ type: "deny", proof: expectedProof, reason: decision.reason }, { target: peerId });
-      }
+      decidedResponse = decision.approved
+        ? {
+            type: "grant",
+            ownerPubKey: identity.publicKeyHex,
+            noteId: invite.noteId,
+            role: invite.role,
+            proof: expectedProof,
+            signature: toHex(sign(identity, new TextEncoder().encode(`grant:${invite.noteId}:${message.guestPubKey}`))),
+          }
+        : { type: "deny", proof: expectedProof, reason: decision.reason };
+      const targetPeerId = latestPeerId.get(message.guestPubKey) ?? peerId;
+      await auth.send(decidedResponse, { target: targetPeerId });
+      const delivered = await waitForDeliveryAck(message.guestPubKey);
+      onDelivery?.({ guestPubKey: message.guestPubKey, approved: decision.approved, delivered });
     } catch {
-      await auth.send({ type: "deny", proof: expectedProof, reason: "Something went wrong on the owner's device." }, { target: peerId });
-    } finally {
-      room.leave();
+      decidedResponse = { type: "deny", proof: expectedProof, reason: "Something went wrong on the owner's device." };
+      const targetPeerId = latestPeerId.get(message.guestPubKey) ?? peerId;
+      await auth.send(decidedResponse, { target: targetPeerId }).catch(() => {});
+      onDelivery?.({ guestPubKey: message.guestPubKey, approved: false, delivered: false });
     }
   };
 
@@ -171,19 +260,45 @@ export async function hostInvite(
 export type RedeemResult =
   | { status: "granted" }
   | { status: "denied"; reason?: string }
-  | { status: "timeout" };
+  | { status: "timeout" }
+  /** Only ever produced by an explicit `signal.abort()` from the caller (see App.tsx's Retry
+   * button) - not a real outcome from the owner's side, just "stop waiting, we're about to try
+   * again from scratch." */
+  | { status: "cancelled" };
 
-const AUTH_TIMEOUT_MS = 60_000;
+export interface RedeemEvents {
+  /** Fired once the owner's device confirms it received the join request - before they've
+   * necessarily made a decision. Lets the caller show "request sent, waiting for approval"
+   * instead of an ambiguous "connecting" state that looks identical whether anyone is even
+   * listening. If this never fires, the owner most likely isn't currently online/hosting this
+   * invite right now. */
+  onAcknowledged?: () => void;
+}
 
 /**
  * Guest side: joins the invite's room, announces itself once the owner's device is present,
- * and waits for a signed grant or an explicit denial. Resolves "timeout" if nothing comes back
- * within 60s - most commonly because the owner isn't actively hosting this invite right now
- * (dialog closed, app not running) or because a direct connection couldn't be established at
- * all (see this module's no-TURN trade-off).
+ * and waits for a signed grant or an explicit denial. Stays joined for the invite's entire
+ * remaining lifetime (up to 24h) rather than a short fixed window - `room.onPeerJoin` fires
+ * again whenever the owner's device shows up (or this device itself reconnects after being
+ * briefly offline), even hours later, so this naturally supports an owner who's offline right
+ * now approving the request once they next open the app, and vice versa. Resolves "timeout"
+ * only once the invite itself expires - most commonly because the owner never approved it in
+ * time, or because a direct connection could never be established at all (see this module's
+ * no-TURN trade-off). Callers that want this to survive their own process restarting (e.g. the
+ * guest closes and reopens the app before the owner responds) should persist the invite and
+ * call this again on next launch - see sharedNotesStore.ts. `signal`, if given, lets the caller
+ * abandon this attempt early (e.g. a manual "Retry" after it's been stalled a while) without
+ * waiting for the full timeout.
  */
-export function redeemInvite(invite: InvitePayload, identity: DeviceIdentity, displayName: string): Promise<RedeemResult> {
-  if (invite.expiresAt < Date.now()) {
+export function redeemInvite(
+  invite: InvitePayload,
+  identity: DeviceIdentity,
+  displayName: string,
+  events: RedeemEvents = {},
+  signal?: AbortSignal,
+): Promise<RedeemResult> {
+  const timeoutMs = invite.expiresAt - Date.now();
+  if (timeoutMs <= 0) {
     return Promise.resolve({ status: "denied", reason: "This invite has expired." });
   }
 
@@ -195,22 +310,34 @@ export function redeemInvite(invite: InvitePayload, identity: DeviceIdentity, di
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       room?.leave();
       resolve(result);
     };
 
-    const timer = setTimeout(() => finish({ status: "timeout" }), AUTH_TIMEOUT_MS);
+    // Declared before the abort check below - `signal` being pre-aborted would otherwise call
+    // finish() -> clearTimeout(timer) while `timer` is still in its temporal dead zone.
+    const timer = setTimeout(() => finish({ status: "timeout" }), timeoutMs);
+
+    const onAbort = () => finish({ status: "cancelled" });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort);
 
     deriveInviteRoom(invite.secret)
       .then(async ({ roomId, password }) => {
-        if (settled) return; // already timed out before the room was even ready
+        if (settled) return; // already timed out/cancelled before the room was even ready
         room = joinTrysteroRoom(password, roomId);
         const auth = room.makeAction<AuthMessage>("cleanotes-auth");
         const proof = await proofOfSecret(invite.secret);
 
         auth.onMessage = (message) => {
           if (settled || message.proof !== proof) return;
-          if (message.type === "grant") {
+          if (message.type === "received") {
+            events.onAcknowledged?.();
+          } else if (message.type === "grant") {
             if (message.ownerPubKey !== invite.ownerPubKey) return finish({ status: "denied", reason: "Owner key mismatch." });
             let validSignature = false;
             try {
@@ -220,6 +347,10 @@ export function redeemInvite(invite: InvitePayload, identity: DeviceIdentity, di
               validSignature = false;
             }
             if (!validSignature) return finish({ status: "denied", reason: "Could not verify the owner's signature." });
+            const joinedSignature = toHex(
+              sign(identity, new TextEncoder().encode(`joined:${message.noteId}:${identity.publicKeyHex}`)),
+            );
+            void auth.send({ type: "joined", proof, guestPubKey: identity.publicKeyHex, signature: joinedSignature });
             finish({ status: "granted" });
           } else if (message.type === "deny") {
             finish({ status: "denied", reason: message.reason });

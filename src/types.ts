@@ -48,9 +48,9 @@ export interface NoteEntry {
 
 export type TreeEntry = FolderEntry | NoteEntry;
 
-/** Which slice of the vault the sidebar's nav (All Notes/Starred/Recently Deleted) tells
- * Home's middle content to show - see App.tsx's `browseFilter` state. */
-export type BrowseFilter = "all" | "starred" | "trash";
+/** Which slice of the vault the sidebar's nav (All Notes/Starred/Recently Deleted/Shared Notes)
+ * tells Home's middle content to show - see App.tsx's `browseFilter` state. */
+export type BrowseFilter = "all" | "starred" | "trash" | "shared";
 
 export type AppMode = "edit" | "study";
 
@@ -171,4 +171,38 @@ export interface CollabAcl {
    * "instant lock" security feature, reversible, independent of revoking anyone. */
   locked: boolean;
   collaborators: Collaborator[];
+}
+
+/** An invite this device (as owner) has created and is waiting on someone to redeem - see
+ * src/collab/sharedNotesStore.ts. Persisted (unlike the invite's own in-memory InvitePayload)
+ * so the pairing listener can survive the Share dialog closing, the owner switching notes, or
+ * even the app restarting, for the invite's full lifetime. */
+export interface OwnerPendingInvite {
+  notePath: string;
+  noteId: string;
+  role: CollabRole;
+  secret: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** Status of a note this device (as guest) has tried to join - see GuestJoinedNote. */
+export type GuestNoteStatus = "pending" | "active" | "denied" | "expired";
+
+/** One note this device (as guest) has redeemed an invite for, tracked from the moment the
+ * invite link is submitted (not just after the owner grants access) so a pending request
+ * survives closing the Join dialog - see src/collab/sharedNotesStore.ts. */
+export interface GuestJoinedNote {
+  noteId: string;
+  ownerPubKey: string;
+  role: CollabRole;
+  secret: string;
+  displayName: string;
+  status: GuestNoteStatus;
+  /** Filled in once the first live sync reveals the note's actual title - the invite itself
+   * deliberately never carries it (see invite.ts's structural-isolation principle). */
+  title?: string;
+  createdAt: number;
+  expiresAt: number;
+  deniedReason?: string;
 }

@@ -9,7 +9,7 @@ export interface PresenceEntry {
 
 /** Reactively lists everyone currently visible in `awareness`'s shared state - every connected
  * collaborator (owner included, from a guest's point of view), excluding this device's own
- * local entry. Used to render "who's here" avatars in Header.tsx/JoinSharedNoteDialog.tsx.
+ * local entry. Used to render "who's here" avatars in Header.tsx/SharedNoteView.tsx.
  * Returns [] whenever there's no active session (awareness undefined). */
 export function usePresence(awareness: Awareness | undefined): PresenceEntry[] {
   const [entries, setEntries] = useState<PresenceEntry[]>([]);

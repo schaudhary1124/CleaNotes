@@ -18,8 +18,10 @@ import { flattenNotes, type TrashItem } from "../utils/fsNotes";
 import { FOLDER_COLOR_HEX } from "../utils/folderColors";
 import { formatRelativeTime } from "../utils/relativeTime";
 import { NOTE_TEMPLATES } from "../utils/templates";
+import type { SharedNoteSummary } from "../collab/acl";
 import { EntryMenu, NoteTree, RenameInput } from "./NoteTree";
-import type { BrowseFilter, FolderEntry, NoteEntry, NoteSummary, TreeEntry } from "../types";
+import { SharedNotesList } from "./SharedNotesList";
+import type { BrowseFilter, FolderEntry, GuestJoinedNote, NoteEntry, NoteSummary, TreeEntry } from "../types";
 
 interface MenuState {
   path: string;
@@ -50,6 +52,15 @@ interface HomeProps {
   onSetStarred: (path: string, value: boolean) => void;
   onRestoreFromTrash: (items: TrashItem[]) => void;
   onRequestDeleteForever: (items: TrashItem[]) => void;
+  /** For filter === "shared" - see App.tsx's ownedSharedNotes/guestNotes state. */
+  ownedSharedNotes: SharedNoteSummary[];
+  guestNotes: GuestJoinedNote[];
+  guestRequestPhases: Record<string, "connecting" | "acknowledged" | "stalled">;
+  onOpenSharedNote: (noteId: string) => void;
+  onJoinSharedNote: () => void;
+  onDismissGuestNote: (noteId: string) => void;
+  onRetryGuestRequest: (noteId: string) => void;
+  onUnshareOwned: (notePath: string) => void;
 }
 
 /** Finds the children directly under `path` ("" for the vault root) - used by the folder/note
@@ -97,6 +108,14 @@ export function Home({
   onSetStarred,
   onRestoreFromTrash,
   onRequestDeleteForever,
+  ownedSharedNotes,
+  guestNotes,
+  guestRequestPhases,
+  onOpenSharedNote,
+  onJoinSharedNote,
+  onDismissGuestNote,
+  onRetryGuestRequest,
+  onUnshareOwned,
 }: HomeProps) {
   const notes = useMemo(() => flattenNotes(tree), [tree]);
   const starredNotes = useMemo(() => notes.filter((n) => n.starred), [notes]);
@@ -208,7 +227,8 @@ export function Home({
   );
 
   const nothingAnywhere = tree.length === 0;
-  const filterTitle = filter === "starred" ? "Starred" : filter === "trash" ? "Recently Deleted" : null;
+  const filterTitle =
+    filter === "starred" ? "Starred" : filter === "trash" ? "Recently Deleted" : filter === "shared" ? "Shared Notes" : null;
 
   return (
     <div ref={containerRef} className="@container relative flex h-full flex-col overflow-y-auto">
@@ -283,7 +303,7 @@ export function Home({
                     <Trash2 size={13} /> Remove
                   </button>
                 </>
-              ) : (
+              ) : filter !== "shared" ? (
                 <>
                   <button
                     type="button"
@@ -300,10 +320,10 @@ export function Home({
                     <FilePlus size={13} /> Note
                   </button>
                 </>
-              )}
+              ) : null}
             </div>
 
-            {filter !== "trash" && (
+            {filter !== "trash" && filter !== "shared" && (
               <div className="border-subtle flex shrink-0 items-center gap-0.5 rounded-lg border p-0.5">
                 <button
                   type="button"
@@ -420,6 +440,20 @@ export function Home({
                 ))}
               </div>
             ))}
+
+          {filter === "shared" && (
+            <SharedNotesList
+              ownedSharedNotes={ownedSharedNotes}
+              guestNotes={guestNotes}
+              requestPhases={guestRequestPhases}
+              onOpenOwned={onOpenNote}
+              onOpenGuest={onOpenSharedNote}
+              onJoinSharedNote={onJoinSharedNote}
+              onDismissGuestNote={onDismissGuestNote}
+              onRetryGuestRequest={onRetryGuestRequest}
+              onUnshareOwned={onUnshareOwned}
+            />
+          )}
 
           {filter === "trash" &&
             (trash.length === 0 ? (
