@@ -95,13 +95,15 @@ function validate(value: unknown): InvitePayload {
   };
 }
 
-function base64UrlEncode(bytes: Uint8Array): string {
+/** Exported for browserPairing.ts's link encoding too - same base64url-JSON shape, smaller
+ * payload (no secret/role/expiresAt to carry, see that module's own comment for why). */
+export function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function base64UrlDecode(text: string): Uint8Array {
+export function base64UrlDecode(text: string): Uint8Array {
   const restored = text.replace(/-/g, "+").replace(/_/g, "/");
   const padded = restored.padEnd(Math.ceil(restored.length / 4) * 4, "=");
   const binary = atob(padded);

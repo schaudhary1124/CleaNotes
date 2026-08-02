@@ -7,7 +7,7 @@ import { registerMilkdownPlugins } from "./setup";
  * real note editor uses (tables, images, voice notes, note pins/link chips, alignment, text
  * decoration marks, etc.), without ever mounting a visible editor. Used to seed a freshly
  * created Yjs collaboration doc with a note's existing content before any real editor binds to
- * it - see yjsBridge.ts's hostSession. Getting the schema exactly right here matters: a
+ * it - see hostSession.ts's hostSession. Getting the schema exactly right here matters: a
  * simplified/partial schema would silently corrupt or drop content the full editor's plugins
  * are the only thing that knows how to parse.
  *

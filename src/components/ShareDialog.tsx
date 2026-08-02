@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Eye, Pencil, UserX } from "lucide-react";
-import { getAcl, getOrCreateAcl, grantCollaborator, revokeCollaborator } from "../collab/acl";
+import { Check, Copy, Eye, Globe, Pencil, UserX } from "lucide-react";
+import { clearBrowserPin, getAcl, getOrCreateAcl, grantCollaborator, revokeCollaborator, setBrowserPin } from "../collab/acl";
 import { loadOrCreateIdentity, type DeviceIdentity } from "../collab/identity";
 import { createInvite, serializeInvite, type InvitePayload } from "../collab/invite";
+import { buildBrowserLink, generateBrowserPin } from "../collab/browserPairing";
 import { upsertOwnerInvite, removeOwnerInvite } from "../collab/sharedNotesStore";
 import type { CollabAcl, CollabRole, OwnerPendingInvite } from "../types";
 
@@ -30,6 +31,13 @@ export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAcl
   const [role, setRole] = useState<CollabRole>("viewer");
   const [copied, setCopied] = useState(false);
   const [creatingInvite, setCreatingInvite] = useState(false);
+  // Separate from the invite link's `role` above - browser access is a weaker gate (a short PIN,
+  // not a device-bound secret), defaulted to the lower-privilege option rather than mirroring
+  // whatever the invite role happens to be set to.
+  const [browserRole, setBrowserRole] = useState<CollabRole>("viewer");
+  const [pinCopied, setPinCopied] = useState(false);
+  const [browserLinkCopied, setBrowserLinkCopied] = useState(false);
+  const [updatingBrowserAccess, setUpdatingBrowserAccess] = useState(false);
 
   useEffect(() => {
     void loadOrCreateIdentity().then(setIdentity);
@@ -87,6 +95,9 @@ export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAcl
         }
       : null;
 
+  const browserLink =
+    acl?.browserPin && identity ? buildBrowserLink({ noteId: acl.noteId, ownerPubKey: identity.publicKeyHex }) : null;
+
   async function handleRevoke(pubKey: string) {
     const next = await revokeCollaborator(notePath, pubKey);
     if (next) setAcl(next);
@@ -105,6 +116,62 @@ export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAcl
     await navigator.clipboard.writeText(serializeInvite(invitePayload));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleEnableBrowserAccess() {
+    if (!identity || updatingBrowserAccess) return;
+    setUpdatingBrowserAccess(true);
+    try {
+      const next = await setBrowserPin(notePath, identity.publicKeyHex, generateBrowserPin(), browserRole);
+      setAcl(next);
+      onAclChanged?.();
+    } finally {
+      setUpdatingBrowserAccess(false);
+    }
+  }
+
+  async function handleRegenerateBrowserPin() {
+    if (!identity || !acl?.browserPin || updatingBrowserAccess) return;
+    setUpdatingBrowserAccess(true);
+    try {
+      const next = await setBrowserPin(notePath, identity.publicKeyHex, generateBrowserPin(), acl.browserPin.role);
+      setAcl(next);
+      onAclChanged?.();
+    } finally {
+      setUpdatingBrowserAccess(false);
+    }
+  }
+
+  async function handleBrowserRoleChange(nextRole: CollabRole) {
+    if (!identity || !acl?.browserPin || updatingBrowserAccess) return;
+    setUpdatingBrowserAccess(true);
+    try {
+      const next = await setBrowserPin(notePath, identity.publicKeyHex, acl.browserPin.pin, nextRole);
+      setAcl(next);
+      onAclChanged?.();
+    } finally {
+      setUpdatingBrowserAccess(false);
+    }
+  }
+
+  async function handleDisableBrowserAccess() {
+    const next = await clearBrowserPin(notePath);
+    if (next) setAcl(next);
+    onAclChanged?.();
+  }
+
+  async function handleCopyPin() {
+    if (!acl?.browserPin) return;
+    await navigator.clipboard.writeText(acl.browserPin.pin);
+    setPinCopied(true);
+    setTimeout(() => setPinCopied(false), 2000);
+  }
+
+  async function handleCopyBrowserLink() {
+    if (!browserLink) return;
+    await navigator.clipboard.writeText(browserLink);
+    setBrowserLinkCopied(true);
+    setTimeout(() => setBrowserLinkCopied(false), 2000);
   }
 
   const activeCollaborators = acl?.collaborators.filter((c) => c.status === "active") ?? [];
@@ -167,6 +234,104 @@ export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAcl
           </div>
         )}
 
+        <div className="border-subtle mt-5 border-t pt-4">
+          <p className="text-primary text-sm font-semibold">Browser access</p>
+          <p className="text-secondary mt-1.5 text-xs leading-relaxed">
+            Anyone with the link and this PIN can join from their browser - no install needed.
+            They'll only ever get access to this one note.
+          </p>
+
+          {!acl?.browserPin ? (
+            <div className="mt-3">
+              <div className="flex gap-2">
+                <RoleOption current={browserRole} value="viewer" icon={<Eye size={13} />} label="Can view" onSelect={setBrowserRole} />
+                <RoleOption current={browserRole} value="editor" icon={<Pencil size={13} />} label="Can edit" onSelect={setBrowserRole} />
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleEnableBrowserAccess()}
+                disabled={!identity || updatingBrowserAccess}
+                className="border-subtle text-secondary mt-3 h-9 w-full rounded-lg border text-sm font-medium transition-colors duration-150 hover:bg-surface-hover disabled:opacity-50"
+              >
+                {updatingBrowserAccess ? "Enabling…" : "Enable browser access"}
+              </button>
+            </div>
+          ) : (
+            <div className="border-subtle bg-surface-hover mt-3 rounded-xl border p-3.5">
+              <p className="text-tertiary text-center text-[10px] font-semibold uppercase tracking-wide">PIN</p>
+              <div className="mt-1 flex items-center justify-center gap-2">
+                <p className="text-primary font-mono text-2xl font-bold tracking-[0.2em]">
+                  {acl.browserPin.pin.slice(0, 3)} {acl.browserPin.pin.slice(3)}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyPin()}
+                  className="btn-ghost h-7 w-7 shrink-0"
+                  title="Copy PIN"
+                  aria-label="Copy PIN"
+                >
+                  {pinCopied ? <Check size={13} /> : <Copy size={13} />}
+                </button>
+              </div>
+
+              <div className="mt-3 flex items-center gap-2">
+                <input
+                  readOnly
+                  value={browserLink ?? ""}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="border-subtle bg-surface text-secondary h-8 w-full truncate rounded-lg border px-2.5 text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleCopyBrowserLink()}
+                  className="btn-ghost h-8 w-8 shrink-0"
+                  title="Copy link"
+                  aria-label="Copy link"
+                >
+                  {browserLinkCopied ? <Check size={14} /> : <Copy size={14} />}
+                </button>
+              </div>
+
+              <div className="mt-3 flex gap-2">
+                <RoleOption
+                  current={acl.browserPin.role}
+                  value="viewer"
+                  icon={<Eye size={13} />}
+                  label="Can view"
+                  onSelect={(r) => void handleBrowserRoleChange(r)}
+                />
+                <RoleOption
+                  current={acl.browserPin.role}
+                  value="editor"
+                  icon={<Pencil size={13} />}
+                  label="Can edit"
+                  onSelect={(r) => void handleBrowserRoleChange(r)}
+                />
+              </div>
+
+              <p className="text-tertiary mt-3 text-xs leading-relaxed">
+                This device has to be online for a browser guest to sync, same as any other
+                collaborator. Regenerating stops new sign-ins with the old PIN without affecting
+                anyone already connected.
+              </p>
+
+              <div className="mt-2 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void handleRegenerateBrowserPin()}
+                  disabled={updatingBrowserAccess}
+                  className="text-tertiary text-xs hover:underline disabled:opacity-50"
+                >
+                  Regenerate PIN
+                </button>
+                <button type="button" onClick={() => void handleDisableBrowserAccess()} className="text-tertiary text-xs hover:underline">
+                  Turn off browser access
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {activeCollaborators.length > 0 && (
           <div className="mt-5">
             <p className="text-tertiary text-xs font-semibold uppercase tracking-wide">Who has access</p>
@@ -174,6 +339,9 @@ export function ShareDialog({ notePath, noteTitle, pendingInvite, onClose, onAcl
               {activeCollaborators.map((c) => (
                 <div key={c.pubKey} className="flex items-center gap-2 rounded-lg px-1 py-1">
                   <span className="text-primary flex-1 truncate text-sm">{c.displayName}</span>
+                  {c.origin === "browser-pin" && (
+                    <Globe size={12} className="text-tertiary shrink-0" aria-label="Joined from a browser" />
+                  )}
                   <div className="border-subtle flex shrink-0 overflow-hidden rounded-lg border text-xs">
                     <button
                       type="button"

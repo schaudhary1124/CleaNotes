@@ -152,6 +152,27 @@ export interface Collaborator {
   /** Revoked entries are kept (not deleted) so the owner has a durable audit trail of who
    * has ever had access - see fsNotes.ts's readCollabAcl/writeCollabAcl. */
   status: "active" | "revoked";
+  /** How this collaborator was granted - informational only (mirrors the "client-side UX
+   * only" pattern used elsewhere in this file), so ShareDialog can label browser guests
+   * distinctly. Undefined for entries granted before this field existed - treat as "invite". */
+  origin?: "invite" | "browser-pin";
+}
+
+/** A note's standing browser-access PIN - see src/collab/browserPairing.ts. Unlike an invite
+ * (single-use, one specific device vetted by the owner), this is a re-enterable entry gate:
+ * every browser identity that submits the correct PIN is auto-granted `role` as its own
+ * Collaborator entry (see acl.ts's setBrowserPin/grantCollaborator). The PIN itself is not the
+ * security boundary on its own - see browserPairing.ts's room-derivation comment - and is not
+ * the collaborator's identity either: the owner can still revoke one browser guest individually
+ * without this PIN needing to change. */
+export interface BrowserPinState {
+  /** Current PIN. Regenerating replaces this value, which changes the pairing room it derives
+   * (see browserPairing.ts) - already-granted collaborators are unaffected, only future
+   * redemptions of the *old* PIN stop working. */
+  pin: string;
+  /** Role granted to anyone who redeems this PIN. */
+  role: CollabRole;
+  createdAt: number;
 }
 
 /** A note's sharing state - see fsNotes.ts's `.collab.json` sidecar, parallel to SketchData's
@@ -171,6 +192,9 @@ export interface CollabAcl {
    * "instant lock" security feature, reversible, independent of revoking anyone. */
   locked: boolean;
   collaborators: Collaborator[];
+  /** Standing browser-access PIN, if the owner has enabled it for this note - null/undefined
+   * means browser access is off. See BrowserPinState and src/collab/browserPairing.ts. */
+  browserPin?: BrowserPinState | null;
 }
 
 /** An invite this device (as owner) has created and is waiting on someone to redeem - see

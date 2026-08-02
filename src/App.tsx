@@ -51,8 +51,11 @@ import { broadcastNoteSaved, listenForNoteSaved } from "./utils/noteSync";
 import { getAcl, grantCollaborator, listSharedNotes, setLocked, unshareNote, type SharedNoteSummary } from "./collab/acl";
 import { loadOrCreateIdentity, type DeviceIdentity } from "./collab/identity";
 import { hostInvite, redeemInvite, type HostHandle, type PairingDecision } from "./collab/signaling";
+import { hostBrowserPairing } from "./collab/browserPairing";
 import type { InvitePayload } from "./collab/invite";
-import { hostSession, joinSession, type HostedSession, type JoinedSession } from "./collab/yjsBridge";
+import { hostSession, type HostedSession } from "./collab/hostSession";
+import type { JoinedSession } from "./collab/yjsBridge";
+import { maintainGuestSession, type ManagedGuestSession } from "./collab/guestSessionSupervisor";
 import { usePresence } from "./collab/usePresence";
 import {
   listOwnerInvites,
@@ -82,6 +85,16 @@ import {
 import type { AppMode, AppSettings, BrowseFilter, GuestJoinedNote, OwnerPendingInvite, TreeEntry } from "./types";
 
 type BootStatus = "loading" | "ready" | "error";
+
+/** One entry in guestSessionsRef - a live-or-reconnecting guest session plus the supervisor
+ * (see guestSessionSupervisor.ts) driving it. `session`/`status`/`canEdit` mirror the latest
+ * callback values so the derived activeGuestSession lookup below can read them synchronously. */
+interface GuestSessionEntry {
+  session: JoinedSession | null;
+  status: "connecting" | "connected" | "offline";
+  canEdit: boolean;
+  managed: ManagedGuestSession;
+}
 
 /** A join request that just arrived for one of this device's own pending invites - surfaced as
  * a global banner (see IncomingShareRequestBanner) rather than trapped inside ShareDialog, since
@@ -426,6 +439,26 @@ function App() {
     setActiveSharedNoteId(null);
     setView("home");
   }, [flushActiveNote]);
+
+  /** Removes a shared-with-you note from this device's list, at any status - a guest previously
+   * had no way to do this themselves for an *active* note (only pending/expired rows had a
+   * dismiss button), so a note the owner revoked while this device wasn't connected to it, or one
+   * the guest simply no longer wants to see, would otherwise linger forever (see
+   * sharedNotesStore.ts - nothing else ever sweeps stale guest entries). If this is the note
+   * currently open, also navigates back first so the live-session effect's own cleanup actually
+   * closes the WebRTC connection instead of leaving it running against a noteId no longer in the
+   * store. */
+  const handleLeaveSharedNote = useCallback(
+    (noteId: string) => {
+      if (activeSharedNoteId === noteId) {
+        setActiveSharedNoteId(null);
+        setView("home");
+      }
+      removeGuestNote(noteId);
+      setGuestNotes(listGuestNotes());
+    },
+    [activeSharedNoteId],
+  );
 
   /** Nav click in the sidebar (All Notes/Starred/Recently Deleted) - switches Home's filter
    * and brings it to the front, since a filter change is invisible while a note is open. */
@@ -917,6 +950,11 @@ function App() {
   // their own; hostedSessionsVersion below is what makes the derived value under it reactive.
   const hostedSharedSessionsRef = useRef(new Map<string, HostedSession>());
   const [hostedSessionsVersion, setHostedSessionsVersion] = useState(0);
+  // Ref-held map of every note's active browser-PIN listener, keyed by `${notePath}:${pin}` (not
+  // just notePath) so a PIN regenerate is just "old key gone, new key added" in the diff below -
+  // no separate "did the pin change" check needed, and the old room stops being listened to
+  // immediately rather than needing an explicit invalidation message (see browserPairing.ts).
+  const browserPairingListenersRef = useRef(new Map<string, HostHandle>());
   // Guards against two overlapping reconcile passes (e.g. the identity-ready effect and the
   // collabVersion effect both firing on the same render) each seeing the same path as "not yet
   // hosted" and starting a duplicate hostSession for it before either awaits far enough to
@@ -952,6 +990,44 @@ function App() {
         }
       }
       if (changed) setHostedSessionsVersion((v) => v + 1);
+
+      // Same diff-by-key approach as hosting above, keyed by notePath+pin (see
+      // browserPairingListenersRef's own comment). Independent of shouldHost above - a note can
+      // have browser access enabled before it has any collaborators at all (nobody's redeemed
+      // the PIN yet), so this listens whenever browserPin is set, not only once hostSession is
+      // already running for it.
+      const pairingByKey = new Map(shared.filter((s) => s.acl.browserPin).map((s) => [`${s.notePath}:${s.acl.browserPin!.pin}`, s]));
+      for (const [key, handle] of browserPairingListenersRef.current) {
+        if (!pairingByKey.has(key)) {
+          handle.close();
+          browserPairingListenersRef.current.delete(key);
+        }
+      }
+      for (const [key, s] of pairingByKey) {
+        if (browserPairingListenersRef.current.has(key)) continue;
+        const browserPin = s.acl.browserPin!;
+        try {
+          const handle = await hostBrowserPairing(s.acl.noteId, browserPin.pin, browserPin.role, currentIdentity, async (pubKey, displayName) => {
+            await grantCollaborator(s.notePath, currentIdentity.publicKeyHex, {
+              pubKey,
+              displayName,
+              role: browserPin.role,
+              origin: "browser-pin",
+            });
+            // Targets this specific note's hosted session regardless of which tab is focused
+            // (unlike activeCollabSession, which only covers whichever note happens to be open
+            // right now) - bypasses hostSession's ~2s ACL cache so a browser guest that connects
+            // to joinSession immediately after being granted (no extra round trip the way the
+            // invite flow has) doesn't get wrongly, terminally denied by a stale read. See
+            // yjsBridge.ts's notifyAclChanged and hostSession's currentAcl cache.
+            void hostedSharedSessionsRef.current.get(s.notePath)?.notifyAclChanged();
+            setCollabVersion((v) => v + 1);
+          });
+          browserPairingListenersRef.current.set(key, handle);
+        } catch {
+          // Same as hostSession above - retried on the next poll/collabVersion bump.
+        }
+      }
     } finally {
       reconcilingHostedSessionsRef.current = false;
     }
@@ -971,6 +1047,7 @@ function App() {
   useEffect(() => {
     return () => {
       for (const session of hostedSharedSessionsRef.current.values()) session.close();
+      for (const handle of browserPairingListenersRef.current.values()) handle.close();
     };
   }, []);
 
@@ -1110,6 +1187,7 @@ function App() {
         pubKey: request.guestPubKey,
         displayName: request.displayName,
         role: request.role,
+        origin: "invite",
       });
       setCollabVersion((v) => v + 1);
     } else {
@@ -1229,90 +1307,120 @@ function App() {
     return () => clearInterval(interval);
   }, [identity, reconcileGuestNotes]);
 
-  // Live session for whichever guest note is currently open in the "shared" view - a separate,
-  // on-demand connection (not part of the supervisor above) since "Live-only" access means this
-  // only needs to exist while the guest is actually looking at the note, not continuously in the
-  // background for every active guest note.
-  const [activeSharedSession, setActiveSharedSession] = useState<JoinedSession | null>(null);
-  const [activeSharedStatus, setActiveSharedStatus] = useState<"connecting" | "connected" | "offline">("connecting");
-  const [activeSharedCanEdit, setActiveSharedCanEdit] = useState(true);
-  // Bumped to retry the connection below after it drops (owner offline, or they just closed
-  // that note) - without this, going "offline" would otherwise be a dead end until the guest
-  // manually navigated away and back, since none of the effect's other deps change on their own.
-  const [sharedReconnectTick, setSharedReconnectTick] = useState(0);
-  // Consecutive-failure counter driving the backoff below - a ref, not state, since bumping it
-  // must never itself trigger a re-render/re-run (sharedReconnectTick already does that). Persists
-  // across retries of the *same* connection attempt (this effect re-running via sharedReconnectTick
-  // alone doesn't reset it) and is reset to 0 the moment a connection actually succeeds.
-  const sharedReconnectAttemptRef = useRef(0);
+  // Ref-held map of every *active* guest note's live session, keyed by noteId - not just the
+  // currently-open one, mirroring hostedSharedSessionsRef above so a guest note stays connected
+  // in the background regardless of which tab is focused. This used to be a single view-scoped
+  // effect that tore the WebRTC connection down and fully renegotiated it (fresh TURN
+  // allocation, fresh ICE, fresh DTLS, a full-doc resync) every time the note view closed and
+  // reopened - a real, measured bandwidth cost even for a one-sentence note. The actual
+  // connect/backoff/reconnect logic now lives in guestSessionSupervisor.ts, shared with the
+  // browser-guest build so it inherits the same correct lifecycle by construction.
+  const guestSessionsRef = useRef(new Map<string, GuestSessionEntry>());
+  const [guestSessionsVersion, setGuestSessionsVersion] = useState(0);
+  const reconcilingGuestSessionsRef = useRef(false);
 
+  const reconcileGuestSessions = useCallback(
+    (currentIdentity: DeviceIdentity) => {
+      if (reconcilingGuestSessionsRef.current) return;
+      reconcilingGuestSessionsRef.current = true;
+      try {
+        const activeNotes = listGuestNotes().filter((n) => n.status === "active");
+        const activeIds = new Set(activeNotes.map((n) => n.noteId));
+        let changed = false;
+        for (const [noteId, entry] of guestSessionsRef.current) {
+          if (!activeIds.has(noteId)) {
+            entry.managed.stop();
+            guestSessionsRef.current.delete(noteId);
+            changed = true;
+          }
+        }
+        for (const note of activeNotes) {
+          if (guestSessionsRef.current.has(note.noteId)) continue;
+          const entry: GuestSessionEntry = {
+            session: null,
+            status: "connecting",
+            canEdit: note.role === "editor",
+            managed: null as unknown as ManagedGuestSession, // assigned synchronously below
+          };
+          entry.managed = maintainGuestSession(
+            {
+              noteId: note.noteId,
+              ownerPubKey: note.ownerPubKey,
+              role: note.role,
+              identity: currentIdentity,
+              displayName: note.displayName,
+            },
+            {
+              onStatusChange: (status) => {
+                entry.status = status;
+                setGuestSessionsVersion((v) => v + 1);
+              },
+              onSessionChange: (session) => {
+                entry.session = session;
+                setGuestSessionsVersion((v) => v + 1);
+              },
+              onCanEditChange: (canEdit) => {
+                entry.canEdit = canEdit;
+                setGuestSessionsVersion((v) => v + 1);
+              },
+              onDenied: () => {
+                // The owner explicitly said no (revoked, or never actually granted) - final, not
+                // worth retrying. handleLeaveSharedNote both removes the store entry and, if this
+                // was the currently-open note, navigates back so the derived lookup below doesn't
+                // keep pointing at a noteId no longer in guestNotes.
+                handleLeaveSharedNote(note.noteId);
+                showToast("The owner removed your access to this note.");
+              },
+              onTitleResolved: (title) => {
+                // The invite deliberately never carries the note's title (see invite.ts) - fill
+                // it in now that the owner has sent the real one, for the sidebar's list.
+                if (title !== note.title) {
+                  updateGuestNoteStatus(note.noteId, "active", { title });
+                  setGuestNotes(listGuestNotes());
+                }
+              },
+            },
+          );
+          guestSessionsRef.current.set(note.noteId, entry);
+          changed = true;
+        }
+        if (changed) setGuestSessionsVersion((v) => v + 1);
+      } finally {
+        reconcilingGuestSessionsRef.current = false;
+      }
+    },
+    [handleLeaveSharedNote],
+  );
+
+  // Runs once identity is ready, then on a 15s poll (matching reconcileGuestNotes' own cadence)
+  // and immediately whenever guestNotes changes (e.g. a pending request just got granted), so a
+  // freshly-granted note starts syncing right away instead of waiting out the poll.
   useEffect(() => {
-    if (view !== "shared" || !activeSharedNoteId || !identity) {
-      setActiveSharedSession(null);
-      return;
-    }
-    const note = guestNotes.find((n) => n.noteId === activeSharedNoteId);
-    if (!note || note.status !== "active") {
-      setActiveSharedSession(null);
-      return;
-    }
-    let cancelled = false;
-    let session: JoinedSession | null = null;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    const retryLater = () => {
-      if (cancelled) return;
-      setActiveSharedStatus("offline");
-      // Exponential backoff (10s, 20s, 40s, ... capped at 2min) instead of a fixed 10s retry -
-      // a persistently unreachable owner (offline for an hour, not just a momentary drop) would
-      // otherwise re-run a full WebRTC/TURN negotiation every 10s indefinitely, which is real
-      // relayed bandwidth (DTLS handshake, ICE, a full document resync on every attempt) for a
-      // connection that has no better chance of succeeding sooner just because we asked more often.
-      const attempt = sharedReconnectAttemptRef.current++;
-      const delay = Math.min(10_000 * 2 ** attempt, 120_000);
-      retryTimer = setTimeout(() => setSharedReconnectTick((t) => t + 1), delay);
-    };
-    setActiveSharedStatus("connecting");
-    joinSession(note.noteId, note.ownerPubKey, note.role, identity, note.displayName, {
-      onCanEditChanged: setActiveSharedCanEdit,
-      onEnded: (reason) => {
-        if (reason === "revoked") {
-          removeGuestNote(note.noteId);
-          setGuestNotes(listGuestNotes());
-          showToast("The owner removed your access to this note.");
-          setActiveSharedSession(null);
-        } else {
-          retryLater();
-        }
-      },
-    })
-      .then((started) => {
-        if (cancelled) {
-          started.close();
-          return;
-        }
-        sharedReconnectAttemptRef.current = 0;
-        session = started;
-        setActiveSharedSession(started);
-        setActiveSharedStatus("connected");
-        setActiveSharedCanEdit(started.canEdit);
-        // The invite deliberately never carries the note's title (see invite.ts) - fill it in
-        // now that the first sync has actually revealed it, for the sidebar's Shared Notes list.
-        const firstLine = started.yXmlFragment.toString().replace(/<[^>]+>/g, "").trim().slice(0, 80);
-        if (firstLine && firstLine !== note.title) {
-          updateGuestNoteStatus(note.noteId, "active", { title: firstLine });
-          setGuestNotes(listGuestNotes());
-        }
-      })
-      .catch(retryLater);
+    if (!identity) return;
+    reconcileGuestSessions(identity);
+    const interval = setInterval(() => reconcileGuestSessions(identity), 15_000);
+    return () => clearInterval(interval);
+  }, [identity, reconcileGuestSessions]);
+  useEffect(() => {
+    if (identity) reconcileGuestSessions(identity);
+  }, [guestNotes, identity, reconcileGuestSessions]);
+  useEffect(() => {
     return () => {
-      cancelled = true;
-      clearTimeout(retryTimer);
-      session?.close();
+      for (const entry of guestSessionsRef.current.values()) entry.managed.stop();
     };
-    // guestNotes is intentionally excluded - re-triggering this on every guestNotes refresh would
-    // reconnect on every 15s poll; only an actual note/identity/view/retry change should reconnect.
+  }, []);
+
+  /** The live session for whichever guest note is currently open in the "shared" view - just a
+   * reactive lookup into guestSessionsRef, not its own independent connection (see above). */
+  const activeGuestSession = useMemo(
+    () => (activeSharedNoteId ? guestSessionsRef.current.get(activeSharedNoteId) : undefined),
+    // guestSessionsVersion is the reactivity trigger for the ref-held map above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, activeSharedNoteId, identity, sharedReconnectTick]);
+    [activeSharedNoteId, guestSessionsVersion],
+  );
+  const activeSharedSession = activeGuestSession?.session ?? null;
+  const activeSharedStatus = activeGuestSession?.status ?? "connecting";
+  const activeSharedCanEdit = activeGuestSession?.canEdit ?? true;
 
   /** Opens a guest-side shared note from the sidebar - a dedicated `view`, not a vault tab,
    * since a guest note has no local file (see JoinSharedNoteDialog.tsx's structural-isolation
@@ -1454,10 +1562,7 @@ function App() {
                 guestNotes={guestNotes}
                 guestRequestPhases={guestRequestPhases}
                 onOpenSharedNote={handleOpenSharedNote}
-                onDismissGuestNote={(noteId) => {
-                  removeGuestNote(noteId);
-                  setGuestNotes(listGuestNotes());
-                }}
+                onDismissGuestNote={handleLeaveSharedNote}
                 onRetryGuestRequest={handleRetryGuestRequest}
                 onUnshareOwned={(notePath) => void handleUnshareOwnedNote(notePath)}
                 activeSharedNoteId={view === "shared" ? activeSharedNoteId : null}
@@ -1511,10 +1616,7 @@ function App() {
                     guestRequestPhases={guestRequestPhases}
                     onOpenSharedNote={handleOpenSharedNote}
                     onJoinSharedNote={() => setJoinSharedNoteOpen(true)}
-                    onDismissGuestNote={(noteId) => {
-                      removeGuestNote(noteId);
-                      setGuestNotes(listGuestNotes());
-                    }}
+                    onDismissGuestNote={handleLeaveSharedNote}
                     onRetryGuestRequest={handleRetryGuestRequest}
                     onUnshareOwned={(notePath) => void handleUnshareOwnedNote(notePath)}
                   />

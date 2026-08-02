@@ -34,22 +34,28 @@ export async function getOrCreateAcl(notePath: string, ownerPubKey: string): Pro
 
 /** Grants (or updates the role of) a collaborator, keyed by their public key. Used once the
  * owner has interactively approved a pairing request - see the two-factor pairing requirement
- * in the security model. Reactivates a previously-revoked entry rather than duplicating it, so
- * `grantedAt` reflects the original grant and history isn't lost. */
+ * in the security model - or once a browser guest has redeemed a valid PIN (see
+ * browserPairing.ts's hostBrowserPairing). Reactivates a previously-revoked entry rather than
+ * duplicating it, so `grantedAt` reflects the original grant and history isn't lost. `origin` is
+ * informational only (see Collaborator's own comment); omit it for a plain role update (e.g.
+ * ShareDialog's Viewer/Editor toggle) and the existing entry's origin is preserved rather than
+ * cleared. */
 export async function grantCollaborator(
   notePath: string,
   ownerPubKey: string,
-  collaborator: { pubKey: string; displayName: string; role: CollabRole },
+  collaborator: { pubKey: string; displayName: string; role: CollabRole; origin?: Collaborator["origin"] },
 ): Promise<CollabAcl> {
   const acl = await getOrCreateAcl(notePath, ownerPubKey);
   const existingIndex = acl.collaborators.findIndex((c) => c.pubKey === collaborator.pubKey);
+  const existing = existingIndex === -1 ? undefined : acl.collaborators[existingIndex];
   const entry: Collaborator = {
     pubKey: collaborator.pubKey,
     displayName: collaborator.displayName,
     role: collaborator.role,
-    grantedAt: existingIndex === -1 ? Date.now() : acl.collaborators[existingIndex].grantedAt,
-    lastSeenAt: existingIndex === -1 ? undefined : acl.collaborators[existingIndex].lastSeenAt,
+    grantedAt: existing ? existing.grantedAt : Date.now(),
+    lastSeenAt: existing?.lastSeenAt,
     status: "active",
+    origin: collaborator.origin ?? existing?.origin,
   };
 
   const collaborators =
@@ -82,6 +88,37 @@ export async function setLocked(notePath: string, locked: boolean): Promise<Coll
   const acl = await readCollabAcl(notePath);
   if (!acl) return null;
   const next: CollabAcl = { ...acl, locked };
+  await writeCollabAcl(notePath, next);
+  return next;
+}
+
+/** Enables (or replaces) this note's standing browser-access PIN - see BrowserPinState and
+ * src/collab/browserPairing.ts. Called both to turn browser access on for the first time and to
+ * regenerate an existing PIN; either way this simply overwrites `browserPin`, which is all
+ * "invalidate the old PIN" requires - the pairing room is derived from the PIN value itself, so
+ * a stale PIN just stops deriving a room anyone is listening on (see App.tsx's
+ * reconcileHostedSessions, which re-diffs against the current value here on every pass).
+ * Already-granted collaborators are untouched: their ongoing access rides the note's session
+ * room, which never depended on the PIN. */
+export async function setBrowserPin(
+  notePath: string,
+  ownerPubKey: string,
+  pin: string,
+  role: CollabRole,
+): Promise<CollabAcl> {
+  const acl = await getOrCreateAcl(notePath, ownerPubKey);
+  const next: CollabAcl = { ...acl, browserPin: { pin, role, createdAt: Date.now() } };
+  await writeCollabAcl(notePath, next);
+  return next;
+}
+
+/** Turns browser access off - no new PIN redemption can succeed afterward. Does not revoke
+ * anyone already granted through it; use revokeCollaborator for that, same as any other
+ * collaborator. */
+export async function clearBrowserPin(notePath: string): Promise<CollabAcl | null> {
+  const acl = await readCollabAcl(notePath);
+  if (!acl) return null;
+  const next: CollabAcl = { ...acl, browserPin: null };
   await writeCollabAcl(notePath, next);
   return next;
 }

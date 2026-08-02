@@ -96,17 +96,18 @@ export interface EditorSelectionRange {
   to: number;
 }
 
-/** Binds the editor to a live collaboration session - see src/collab/yjsBridge.ts, which
- * creates `yXmlFragment` for either the owner (hostSession) or a guest (joinSession). Passing
- * this swaps Milkdown's plain undo/redo history for Yjs-aware undo (see yUndoPlugin below,
- * which only undoes *this device's own* edits, never a collaborator's) and, when `canEdit` is
- * false (a Viewer, or the note is currently locked), makes the editor read-only. */
+/** Binds the editor to a live collaboration session - see src/collab/hostSession.ts (owner) and
+ * src/collab/yjsBridge.ts (guest), which create `yXmlFragment` for the owner (hostSession) or a
+ * guest (joinSession) respectively. Passing this swaps Milkdown's plain undo/redo history for
+ * Yjs-aware undo (see yUndoPlugin below, which only undoes *this device's own* edits, never a
+ * collaborator's) and, when `canEdit` is false (a Viewer, or the note is currently locked),
+ * makes the editor read-only. */
 export interface CollabPluginConfig {
   yXmlFragment: XmlFragment;
   canEdit: boolean;
-  /** Live cursors/selections/presence - see src/collab/yjsBridge.ts. Optional only so a caller
-   * mid-transition (e.g. the moment a session ends) can't be forced to fabricate one; in
-   * practice both hostSession and joinSession always provide it. */
+  /** Live cursors/selections/presence - see src/collab/hostSession.ts/yjsBridge.ts. Optional
+   * only so a caller mid-transition (e.g. the moment a session ends) can't be forced to
+   * fabricate one; in practice both hostSession and joinSession always provide it. */
   awareness?: Awareness;
 }
 
@@ -187,7 +188,7 @@ export function registerMilkdownPlugins(
       configureVoiceNoteSchemas(ctx);
       // Read-only for a Viewer collaborator (or when the owner has the note locked) - this is
       // a UX signal only, not the actual security boundary, which lives entirely on the
-      // owner's device (see yjsBridge.ts's hostSession: it never applies/rebroadcasts an
+      // owner's device (see hostSession.ts's hostSession: it never applies/rebroadcasts an
       // inbound update from a non-editor, independent of what this device's own UI allows).
       if (collabSession && !collabSession.canEdit) {
         ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => false }));

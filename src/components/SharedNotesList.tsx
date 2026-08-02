@@ -199,18 +199,27 @@ function GuestNoteRow({
   }
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={`group flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors duration-150 ${
+    <div
+      className={`group flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 ${
         active ? "bg-accent-soft text-accent" : "text-secondary hover:bg-surface-hover hover:text-primary"
       }`}
     >
-      {note.role === "editor" ? <Pencil size={13} className="shrink-0" /> : <Eye size={13} className="shrink-0" />}
-      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        {note.role === "editor" ? <Pencil size={13} className="shrink-0" /> : <Eye size={13} className="shrink-0" />}
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+      </button>
       <span className="border-subtle text-tertiary shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">
         {note.role}
       </span>
-    </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="btn-ghost h-5 w-5 shrink-0 opacity-0 group-hover:opacity-100"
+        title="Remove from your shared notes"
+        aria-label={`Remove ${title} from your shared notes`}
+      >
+        <X size={12} />
+      </button>
+    </div>
   );
 }

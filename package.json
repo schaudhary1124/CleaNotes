@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "release": "bash scripts/release.sh"
+    "release": "bash scripts/release.sh",
+    "dev:browser-guest": "vite --config vite.browser-guest.config.ts",
+    "build:browser-guest": "tsc --noEmit && vite build --config vite.browser-guest.config.ts && mv docs/edit/browser-guest.html docs/edit/index.html && node scripts/check-browser-bundle.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

@@ -3,12 +3,19 @@ export interface Env {
   TURN_KEY_API_TOKEN: string;
 }
 
-// Origins the CleaNotes desktop app can actually run under - Tauri's webview on macOS/Linux,
-// Tauri's webview on Windows, and the Vite dev server used by `npm run dev`. Anything else gets
-// no CORS headers, which stops the fetch from a stray browser tab (the API token itself never
-// leaves this Worker either way, but there's no reason to hand out free TURN credentials to
-// arbitrary web pages that happen to find this URL).
-const ALLOWED_ORIGINS = new Set(["tauri://localhost", "https://tauri.localhost", "http://localhost:1420"]);
+// Origins that can actually need real CleaNotes TURN credentials - the desktop app's Tauri
+// webview on macOS/Linux, its webview on Windows, the Vite dev server used by `npm run dev`, the
+// deployed browser-guest page (see vite.browser-guest.config.ts/docs/edit/), and that page's own
+// `vite dev` origin. Anything else gets no CORS headers, which stops the fetch from a stray
+// browser tab (the API token itself never leaves this Worker either way, but there's no reason
+// to hand out free TURN credentials to arbitrary web pages that happen to find this URL).
+const ALLOWED_ORIGINS = new Set([
+  "tauri://localhost",
+  "https://tauri.localhost",
+  "http://localhost:1420",
+  "https://schaudhary1124.github.io",
+  "http://localhost:5173",
+]);
 
 // Comfortably covers a note-sharing session without forcing a re-fetch every few minutes; well
 // under Cloudflare's max TTL.

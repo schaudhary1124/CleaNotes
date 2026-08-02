@@ -102,7 +102,11 @@ async function roomConfig(password: string): Promise<JoinRoomConfig> {
   return {
     appId: APP_ID,
     password,
-    relayConfig: { urls: CURATED_RELAYS },
+    // A single relay rate-limiting or briefly refusing a connection is expected, routine
+    // behavior given how many independent public relays are in play (see CURATED_RELAYS'
+    // comment) - Trystero's own console.warn for these isn't actionable by the person using the
+    // app and would just read as an alarming error in production, so it's suppressed here.
+    relayConfig: { urls: CURATED_RELAYS, warnOnRelayFailure: false },
     rtcConfig: { iceServers: await getIceServers() },
   };
 }
