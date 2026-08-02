@@ -1,0 +1,10 @@
+name = "cleanotes-turn-credentials"
+main = "src/index.ts"
+compatibility_date = "2026-08-02"
+
+[vars]
+# Your Realtime TURN "Turn Key ID" from the Cloudflare dashboard - not secret, safe to commit.
+TURN_KEY_ID = "73ef6e8bce3ae3a9bdff104a0174163c"
+
+# TURN_KEY_API_TOKEN is NOT set here - it's a secret, set separately via:
+#   npx wrangler secret put TURN_KEY_API_TOKEN

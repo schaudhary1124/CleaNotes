@@ -9,9 +9,11 @@ import { fromHex, sha256Hex, toHex } from "./hex";
  * used *only* to exchange the WebRTC SDP/ICE handshake (and, on top of that, our own
  * proof-of-secret application handshake below) - once a peer connection is up, everything rides
  * the DTLS-encrypted WebRTC DataChannel directly between the two devices, never touching the
- * relay again. See the collab plan's "known trade-offs" section: no TURN relay is used (by
- * design, to stay 100% free/serverless), so a minority of strict-NAT pairs simply won't be able
- * to connect directly - callers should surface RedeemResult's "timeout" case accordingly.
+ * relay again. For the minority of strict-NAT/CGNAT pairs that can't reach each other directly,
+ * `getIceServers` below fetches short-lived Cloudflare Realtime TURN credentials from our own
+ * credentials Worker (see workers/turn-credentials/) as a relay fallback - callers should still
+ * surface RedeemResult's "timeout" case for the rare case that fails too (Worker unreachable and
+ * direct P2P both fail).
  *
  * Room ids/passwords are always sha256 of the invite secret plus a domain-separation prefix,
  * never the raw secret - so a relay operator (or anyone else watching the public relay) never
@@ -39,24 +41,66 @@ const CURATED_RELAYS = [
 ];
 
 // Google's long-standing public STUN endpoints - discovery of this device's own reachable
-// address/port only, never any application data. No TURN relay - see this module's doc
-// comment on why, and the collab plan's disclosed trade-off.
+// address/port only, never any application data. Used as-is for direct P2P discovery, and as
+// the fallback ICE config below if the TURN credentials Worker can't be reached.
 const STUN_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [{ urls: STUN_SERVERS }];
 
-function roomConfig(password: string): JoinRoomConfig {
+// Our own Cloudflare Worker (workers/turn-credentials/) that mints short-lived Realtime TURN
+// credentials - the Worker holds the long-lived API token server-side and hands back a
+// time-boxed username/credential pair, never the token itself. Fill in after `wrangler deploy`
+// (and add the same host to tauri.conf.json's CSP connect-src).
+const TURN_CREDENTIALS_URL = "https://cleanotes-turn-credentials.schaudhary-projects.workers.dev";
+const ICE_FETCH_TIMEOUT_MS = 5_000;
+// Refetch a bit ahead of the Worker-issued credential's actual expiry, so we're never caught
+// trying to open a room with a credential that just expired.
+const ICE_REFRESH_MARGIN_MS = 10 * 60_000;
+
+let iceServersCache: { iceServers: RTCIceServer[]; expiresAt: number } | null = null;
+// Coalesces concurrent callers (e.g. hostSession and a pairing attempt firing around the same
+// moment) onto a single in-flight fetch instead of each starting their own.
+let iceServersInFlight: Promise<RTCIceServer[]> | null = null;
+
+async function fetchTurnIceServers(): Promise<RTCIceServer[]> {
+  const res = await fetch(TURN_CREDENTIALS_URL, { method: "POST", signal: AbortSignal.timeout(ICE_FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`TURN credential fetch failed: ${res.status}`);
+  const data = (await res.json()) as { iceServers: RTCIceServer[]; ttl?: number };
+  const ttlMs = (data.ttl ?? 6 * 60 * 60) * 1000;
+  iceServersCache = { iceServers: data.iceServers, expiresAt: Date.now() + ttlMs - ICE_REFRESH_MARGIN_MS };
+  return data.iceServers;
+}
+
+/** Resolves to this session's ICE server config - Cloudflare's STUN+TURN mix when the
+ * credentials Worker is reachable, so strict-NAT pairs can still connect via relay; falls back
+ * to Google's public STUN-only servers (direct P2P only, same as before TURN was added) if the
+ * Worker call fails for any reason, so a hiccup fetching credentials never blocks pairing/sync
+ * outright - it just loses relay fallback for that one attempt. */
+async function getIceServers(): Promise<RTCIceServer[]> {
+  if (iceServersCache && iceServersCache.expiresAt > Date.now()) return iceServersCache.iceServers;
+  if (!iceServersInFlight) {
+    iceServersInFlight = fetchTurnIceServers()
+      .catch(() => FALLBACK_ICE_SERVERS)
+      .finally(() => {
+        iceServersInFlight = null;
+      });
+  }
+  return iceServersInFlight;
+}
+
+async function roomConfig(password: string): Promise<JoinRoomConfig> {
   return {
     appId: APP_ID,
     password,
     relayConfig: { urls: CURATED_RELAYS },
-    rtcConfig: { iceServers: [{ urls: STUN_SERVERS }] },
+    rtcConfig: { iceServers: await getIceServers() },
   };
 }
 
-/** Joins a Trystero room with this module's shared appId/curated-relay/STUN config - the one
+/** Joins a Trystero room with this module's shared appId/curated-relay/ICE config - the one
  * place both the pairing handshake (above) and the ongoing sync session (yjsBridge.ts) actually
  * call `joinRoom`, so both stay consistent if that config ever changes. */
-export function joinTrysteroRoom(password: string, roomId: string): Room {
-  return joinRoom(roomConfig(password), roomId);
+export async function joinTrysteroRoom(password: string, roomId: string): Promise<Room> {
+  return joinRoom(await roomConfig(password), roomId);
 }
 
 const SESSION_DOMAIN = "cleanotes-session-v1";
@@ -162,7 +206,7 @@ export async function hostInvite(
   onDelivery?: (result: DeliveryResult) => void,
 ): Promise<HostHandle> {
   const { roomId, password } = await deriveInviteRoom(invite.secret);
-  const room: Room = joinTrysteroRoom(password, roomId);
+  const room: Room = await joinTrysteroRoom(password, roomId);
   const auth = room.makeAction<AuthMessage>("cleanotes-auth");
   const expectedProof = await proofOfSecret(invite.secret);
 
@@ -329,7 +373,14 @@ export function redeemInvite(
     deriveInviteRoom(invite.secret)
       .then(async ({ roomId, password }) => {
         if (settled) return; // already timed out/cancelled before the room was even ready
-        room = joinTrysteroRoom(password, roomId);
+        const joinedRoom = await joinTrysteroRoom(password, roomId);
+        if (settled) {
+          // Timed out/cancelled while ICE servers were fetching - finish() already ran without
+          // this room (it didn't exist yet), so it's on us to leave it instead of leaking it.
+          joinedRoom.leave();
+          return;
+        }
+        room = joinedRoom;
         const auth = room.makeAction<AuthMessage>("cleanotes-auth");
         const proof = await proofOfSecret(invite.secret);
 

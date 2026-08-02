@@ -27,7 +27,7 @@
     ],
     "security": {
       "csp": {
-        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 wss://relay.damus.io wss://nos.lol wss://bucket.coracle.social wss://purplerelay.com wss://relay.mostro.network stun:stun.l.google.com:19302 stun:stun1.l.google.com:19302"
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 wss://relay.damus.io wss://nos.lol wss://bucket.coracle.social wss://purplerelay.com wss://relay.mostro.network stun:stun.l.google.com:19302 stun:stun1.l.google.com:19302 https://cleanotes-turn-credentials.schaudhary-projects.workers.dev stun:stun.cloudflare.com:3478 stun:stun.cloudflare.com:53 turn:turn.cloudflare.com:3478 turn:turn.cloudflare.com:53 turn:turn.cloudflare.com:80 turns:turn.cloudflare.com:5349 turns:turn.cloudflare.com:443"
       }
     },
     "macOSPrivateApi": true

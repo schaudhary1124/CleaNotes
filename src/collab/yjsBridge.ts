@@ -124,7 +124,7 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
   // would fire and be missed by a listener that doesn't exist yet).
 
   const { roomId, password } = await deriveSessionRoom(acl.noteId);
-  const room = joinTrysteroRoom(password, roomId);
+  const room = await joinTrysteroRoom(password, roomId);
   const ctrl = room.makeAction<SessionCtrlMessage>("cleanotes-session-ctrl");
   const update = room.makeAction<Uint8Array>("cleanotes-session-update");
   const awarenessAction = room.makeAction<Uint8Array>("cleanotes-session-awareness");
@@ -364,7 +364,14 @@ export function joinSession(
     deriveSessionRoom(noteId)
       .then(async ({ roomId, password }) => {
         if (settled) return;
-        room = joinTrysteroRoom(password, roomId);
+        const joinedRoom = await joinTrysteroRoom(password, roomId);
+        if (settled) {
+          // Timed out/cancelled while ICE servers were fetching - fail() already ran without
+          // this room (it didn't exist yet), so it's on us to leave it instead of leaking it.
+          joinedRoom.leave();
+          return;
+        }
+        room = joinedRoom;
         const ctrl = room.makeAction<SessionCtrlMessage>("cleanotes-session-ctrl");
         const update = room.makeAction<Uint8Array>("cleanotes-session-update");
         const awarenessAction = room.makeAction<Uint8Array>("cleanotes-session-awareness");
