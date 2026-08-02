@@ -15,6 +15,13 @@ import tailwindcss from "@tailwindcss/vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // GitHub Pages serves this repo under /CleaNotes/ (a project page, not a custom domain), and
+  // this build lands a level deeper at docs/edit/ - without an explicit base, Vite defaults to
+  // "/" and emits asset references like /assets/foo.js, which resolve to the wrong place
+  // (domain root) on a nested deployment and load nothing, silently, leaving a blank page. The
+  // main vite.config.ts never needs this: Tauri's webview serves dist/ as its own root, not a
+  // nested path on a real host.
+  base: "/CleaNotes/edit/",
   build: {
     outDir: "docs/edit",
     rollupOptions: {
