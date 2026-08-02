@@ -1,11 +1,14 @@
 import * as Y from "yjs";
 import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
+import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import type { Room } from "trystero/nostr";
 import { canEdit, getAcl, touchLastSeen } from "./acl";
 import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
 import type { CollabAcl, CollabRole } from "../types";
+import { readNote } from "../utils/fsNotes";
+import { parseMarkdownToProseMirrorDoc } from "../milkdown/headlessParse";
 
 /**
  * The live CRDT sync engine, layered on top of signaling.ts's transport and acl.ts's
@@ -28,6 +31,13 @@ const MAX_AWARENESS_BYTES = 8 * 1024;
 const RATE_LIMIT_BUCKET_SIZE = 50;
 const RATE_LIMIT_REFILL_PER_SEC = 20;
 const HELLO_FRESHNESS_MS = 30_000;
+// Coalesces cursor-move/presence broadcasts (including y-protocols/awareness's own internal
+// self-renewal heartbeat) into one send per window instead of one per change - see hostSession's
+// and joinSession's awareness.on("update") handlers.
+const AWARENESS_BROADCAST_THROTTLE_MS = 200;
+// Leading + trailing batch window for content updates - see hostSession's/joinSession's
+// ydoc.on("updateV2") handlers for the full reasoning.
+const CONTENT_BATCH_WINDOW_MS = 50;
 const SESSION_JOIN_TIMEOUT_MS = 20_000;
 
 // A small curated palette rather than generated HSL, so presence colors stay legible (no
@@ -123,6 +133,20 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
   // attached (see its own comment for why: setting it now, before an `await` yields control,
   // would fire and be missed by a listener that doesn't exist yet).
 
+  // Seed the freshly created (empty) Y.Doc with the note's current on-disk content before
+  // anything below - the "hello" handshake's catch-up send, or a guest's hello landing mid-await
+  // - can observe or broadcast it. A bare new Y.Doc must never reach a real ProseMirror editor
+  // via ySyncPlugin: that plugin forcibly rewrites the editor to match whatever the fragment
+  // holds, and the autosave that follows writes that straight back over the real .md file -
+  // this exact gap previously wiped two real notes. See prosemirrorToYXmlFragment's own doc
+  // comment: it's meant precisely for "importing existing content to a Y.Doc for the first
+  // time," and must run before this fragment is exposed to any sync machinery.
+  const onDiskContent = await readNote(notePath);
+  if (onDiskContent.length > 0) {
+    const doc = await parseMarkdownToProseMirrorDoc(onDiskContent, notePath);
+    prosemirrorToYXmlFragment(doc, yXmlFragment);
+  }
+
   const { roomId, password } = await deriveSessionRoom(acl.noteId);
   const room = await joinTrysteroRoom(password, roomId);
   const ctrl = room.makeAction<SessionCtrlMessage>("cleanotes-session-ctrl");
@@ -168,7 +192,7 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
       limiter: { tokens: RATE_LIMIT_BUCKET_SIZE, lastRefill: Date.now() },
       lastKnownCanEdit: canEdit(latest, message.pubKey),
     });
-    await update.send(Y.encodeStateAsUpdate(ydoc), { target: peerId });
+    await update.send(Y.encodeStateAsUpdateV2(ydoc), { target: peerId });
     const welcomeSignature = toHex(sign(identity, signedText("welcome", acl.noteId, message.pubKey)));
     await ctrl.send({ type: "welcome", signature: welcomeSignature }, { target: peerId });
     // Catch the newly-joined peer up on everyone already present, not just future changes.
@@ -187,7 +211,7 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
 
     const latest = await currentAcl();
     if (!canEdit(latest, peer.pubKey)) return; // viewer, revoked, or the note is locked - drop, never apply
-    Y.applyUpdate(ydoc, data, peerId);
+    Y.applyUpdateV2(ydoc, data, peerId);
   };
 
   // Tracks which Yjs awareness client ids belong to which Trystero peer, purely so a peer
@@ -201,6 +225,32 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
     applyAwarenessUpdate(awareness, data, peerId);
   };
 
+  // Coalesces awareness broadcasts instead of sending one WebRTC message per change - without
+  // this, every keystroke's cursor move (see y-prosemirror's cursor plugin, which updates
+  // awareness on essentially every transaction) and y-protocols/awareness's own internal ~15s
+  // "renew my clock" self-update each fired an immediate send, which adds up fast once relayed
+  // through a TURN allocation rather than a direct P2P path. `pendingAwarenessOriginPeerIds`
+  // tracks which peer(s) contributed to the batch being flushed, so a peer's own update still
+  // never gets echoed back to them - same intent as the old per-event `origin === peerId` check,
+  // just applied to the whole coalesced batch instead of one change at a time.
+  let pendingAwarenessClientIds = new Set<number>();
+  let pendingAwarenessOriginPeerIds = new Set<string>();
+  let awarenessBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flushAwarenessBroadcast() {
+    awarenessBroadcastTimer = null;
+    const clientIds = [...pendingAwarenessClientIds];
+    const originPeerIds = pendingAwarenessOriginPeerIds;
+    pendingAwarenessClientIds = new Set();
+    pendingAwarenessOriginPeerIds = new Set();
+    if (clientIds.length === 0) return;
+    const encoded = encodeAwarenessUpdate(awareness, clientIds);
+    for (const peerId of authorizedPeers.keys()) {
+      if (originPeerIds.has(peerId)) continue;
+      void awarenessAction.send(encoded, { target: peerId });
+    }
+  }
+
   awareness.on("update", ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
     if (typeof origin === "string") {
       let clientIds = peerClientIds.get(origin);
@@ -210,13 +260,10 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
       }
       for (const id of [...added, ...updated]) clientIds.add(id);
       for (const id of removed) clientIds.delete(id);
+      pendingAwarenessOriginPeerIds.add(origin);
     }
-    const changed = [...added, ...updated, ...removed];
-    const encoded = encodeAwarenessUpdate(awareness, changed);
-    for (const peerId of authorizedPeers.keys()) {
-      if (origin === peerId) continue;
-      void awarenessAction.send(encoded, { target: peerId });
-    }
+    for (const id of [...added, ...updated, ...removed]) pendingAwarenessClientIds.add(id);
+    if (!awarenessBroadcastTimer) awarenessBroadcastTimer = setTimeout(flushAwarenessBroadcast, AWARENESS_BROADCAST_THROTTLE_MS);
   });
 
   // Safe to set now that the listener above exists to actually broadcast it - see this
@@ -224,16 +271,47 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
   // regardless, via the hello handler's catch-up send above - this isn't the only path.)
   awareness.setLocalStateField("user", { name: OWNER_PRESENCE_NAME, color: colorForPubKey(identity.publicKeyHex) });
 
+  let contentBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingContentUpdates: Uint8Array[] = [];
+  let pendingContentOriginPeerIds = new Set<string>();
+
+  function broadcastContentUpdate(change: Uint8Array, excludePeerIds: Set<string>) {
+    for (const peerId of authorizedPeers.keys()) {
+      if (excludePeerIds.has(peerId)) continue;
+      void update.send(change, { target: peerId });
+    }
+  }
+
   // Fires for every local OR accepted-remote change alike (Yjs doesn't distinguish the two at
   // this level) - broadcasting to everyone except the update's own origin peer both propagates
   // local edits to all collaborators and relays one collaborator's accepted edit to the others,
   // with the same line. Redundant re-delivery to the origin would be harmless anyway (Yjs
   // updates are idempotent), this just avoids the pointless echo.
-  ydoc.on("update", (change: Uint8Array, origin: unknown) => {
-    for (const peerId of authorizedPeers.keys()) {
-      if (origin === peerId) continue;
-      void update.send(change, { target: peerId });
+  //
+  // Leading + trailing batching: the very first change since idle is sent immediately (so a
+  // remote collaborator sees the first keystroke of a new burst with no added latency), then
+  // anything that follows within CONTENT_BATCH_WINDOW_MS is held and merged into one message at
+  // the trailing edge instead of one WebRTC send per keystroke - each send has fixed framing
+  // overhead (WebRTC/SCTP, plus TURN's relay framing when relayed), which a fast typist would
+  // otherwise pay per character for no benefit, since nothing renders any faster than the network
+  // round-trip anyway.
+  ydoc.on("updateV2", (change: Uint8Array, origin: unknown) => {
+    const originPeerId = typeof origin === "string" ? origin : null;
+    if (!contentBatchTimer) {
+      broadcastContentUpdate(change, originPeerId ? new Set([originPeerId]) : new Set());
+      contentBatchTimer = setTimeout(() => {
+        contentBatchTimer = null;
+        if (pendingContentUpdates.length === 0) return;
+        const merged = pendingContentUpdates.length === 1 ? pendingContentUpdates[0] : Y.mergeUpdatesV2(pendingContentUpdates);
+        const excludePeerIds = pendingContentOriginPeerIds;
+        pendingContentUpdates = [];
+        pendingContentOriginPeerIds = new Set();
+        broadcastContentUpdate(merged, excludePeerIds);
+      }, CONTENT_BATCH_WINDOW_MS);
+      return;
     }
+    pendingContentUpdates.push(change);
+    if (originPeerId) pendingContentOriginPeerIds.add(originPeerId);
   });
 
   room.onPeerLeave = (peerId) => {
@@ -292,6 +370,14 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
         void ctrl.send({ type: "closing" }, { target: peerId }).catch(() => {});
       }
       authorizedPeers.clear();
+      if (awarenessBroadcastTimer) {
+        clearTimeout(awarenessBroadcastTimer);
+        awarenessBroadcastTimer = null;
+      }
+      if (contentBatchTimer) {
+        clearTimeout(contentBatchTimer);
+        contentBatchTimer = null;
+      }
       setTimeout(() => {
         room.leave();
         ydoc.destroy();
@@ -346,11 +432,20 @@ export function joinSession(
     // NOT setLocalStateField'd yet - see the matching comment in hostSession above for why this
     // waits until the relay listener below actually exists.
     let room: Room | null = null;
+    // Set inside the room-join callback below, once awareness broadcasting is actually wired up
+    // - declared here too so every teardown path (fail(), the explicit close() below, and the
+    // revoked/closing branches) can clear it without leaving a dangling send scheduled after the
+    // session has already ended.
+    let awarenessBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+    // Same reasoning as awarenessBroadcastTimer above, for the content-update batch window.
+    let contentBatchTimer: ReturnType<typeof setTimeout> | null = null;
 
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
+      if (contentBatchTimer) clearTimeout(contentBatchTimer);
       room?.leave();
       ydoc.destroy();
       reject(err);
@@ -377,7 +472,7 @@ export function joinSession(
         const awarenessAction = room.makeAction<Uint8Array>("cleanotes-session-awareness");
 
         update.onMessage = (data) => {
-          if (data instanceof Uint8Array) Y.applyUpdate(ydoc, data, "remote");
+          if (data instanceof Uint8Array) Y.applyUpdateV2(ydoc, data, "remote");
         };
 
         awarenessAction.onMessage = (data) => {
@@ -405,6 +500,8 @@ export function joinSession(
                 awareness,
                 canEdit: role === "editor",
                 close: () => {
+                  if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
+                  if (contentBatchTimer) clearTimeout(contentBatchTimer);
                   room?.leave();
                   ydoc.destroy();
                 },
@@ -419,24 +516,56 @@ export function joinSession(
           if (message.type === "state") {
             events.onCanEditChanged?.(message.canEdit);
           } else if (message.type === "revoked") {
+            if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
+            if (contentBatchTimer) clearTimeout(contentBatchTimer);
             room?.leave();
             ydoc.destroy();
             events.onEnded?.("revoked");
           } else if (message.type === "closing") {
+            if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
+            if (contentBatchTimer) clearTimeout(contentBatchTimer);
             room?.leave();
             ydoc.destroy();
             events.onEnded?.("closing");
           }
         };
 
-        ydoc.on("update", (change: Uint8Array, origin: unknown) => {
+        // Same leading + trailing batching as hostSession's ydoc.on("updateV2") - see its comment
+        // for the full reasoning. Only one peer to exclude here (the owner), not a set, since a
+        // guest only ever talks to the owner in this star topology.
+        let pendingContentUpdates: Uint8Array[] = [];
+        ydoc.on("updateV2", (change: Uint8Array, origin: unknown) => {
           if (origin === "remote") return; // don't echo back what the owner just sent us
-          void update.send(change);
+          if (!contentBatchTimer) {
+            void update.send(change);
+            contentBatchTimer = setTimeout(() => {
+              contentBatchTimer = null;
+              if (pendingContentUpdates.length === 0) return;
+              const merged = pendingContentUpdates.length === 1 ? pendingContentUpdates[0] : Y.mergeUpdatesV2(pendingContentUpdates);
+              pendingContentUpdates = [];
+              void update.send(merged);
+            }, CONTENT_BATCH_WINDOW_MS);
+            return;
+          }
+          pendingContentUpdates.push(change);
         });
 
+        // Coalesced the same way as hostSession's awareness broadcast - see that one's comment
+        // for why (essentially every keystroke plus an internal ~15s library heartbeat, each
+        // otherwise triggering its own immediate WebRTC send).
+        let pendingAwarenessClientIds = new Set<number>();
         awareness.on("update", ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
           if (origin === "remote") return;
-          void awarenessAction.send(encodeAwarenessUpdate(awareness, [...added, ...updated, ...removed]));
+          for (const id of [...added, ...updated, ...removed]) pendingAwarenessClientIds.add(id);
+          if (!awarenessBroadcastTimer) {
+            awarenessBroadcastTimer = setTimeout(() => {
+              awarenessBroadcastTimer = null;
+              const clientIds = [...pendingAwarenessClientIds];
+              pendingAwarenessClientIds = new Set();
+              if (clientIds.length === 0) return;
+              void awarenessAction.send(encodeAwarenessUpdate(awareness, clientIds));
+            }, AWARENESS_BROADCAST_THROTTLE_MS);
+          }
         });
 
         room.onPeerJoin = async () => {

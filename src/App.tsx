@@ -1240,6 +1240,11 @@ function App() {
   // that note) - without this, going "offline" would otherwise be a dead end until the guest
   // manually navigated away and back, since none of the effect's other deps change on their own.
   const [sharedReconnectTick, setSharedReconnectTick] = useState(0);
+  // Consecutive-failure counter driving the backoff below - a ref, not state, since bumping it
+  // must never itself trigger a re-render/re-run (sharedReconnectTick already does that). Persists
+  // across retries of the *same* connection attempt (this effect re-running via sharedReconnectTick
+  // alone doesn't reset it) and is reset to 0 the moment a connection actually succeeds.
+  const sharedReconnectAttemptRef = useRef(0);
 
   useEffect(() => {
     if (view !== "shared" || !activeSharedNoteId || !identity) {
@@ -1257,7 +1262,14 @@ function App() {
     const retryLater = () => {
       if (cancelled) return;
       setActiveSharedStatus("offline");
-      retryTimer = setTimeout(() => setSharedReconnectTick((t) => t + 1), 10_000);
+      // Exponential backoff (10s, 20s, 40s, ... capped at 2min) instead of a fixed 10s retry -
+      // a persistently unreachable owner (offline for an hour, not just a momentary drop) would
+      // otherwise re-run a full WebRTC/TURN negotiation every 10s indefinitely, which is real
+      // relayed bandwidth (DTLS handshake, ICE, a full document resync on every attempt) for a
+      // connection that has no better chance of succeeding sooner just because we asked more often.
+      const attempt = sharedReconnectAttemptRef.current++;
+      const delay = Math.min(10_000 * 2 ** attempt, 120_000);
+      retryTimer = setTimeout(() => setSharedReconnectTick((t) => t + 1), delay);
     };
     setActiveSharedStatus("connecting");
     joinSession(note.noteId, note.ownerPubKey, note.role, identity, note.displayName, {
@@ -1278,6 +1290,7 @@ function App() {
           started.close();
           return;
         }
+        sharedReconnectAttemptRef.current = 0;
         session = started;
         setActiveSharedSession(started);
         setActiveSharedStatus("connected");
