@@ -27,17 +27,28 @@ import { fromHex, sha256Hex, toHex } from "./hex";
 
 const APP_ID = "cleanotes-collab-v1";
 
-// A deliberately small, curated subset of Trystero's ~50 default community Nostr relays,
-// rather than the full default pool: lets tauri.conf.json's CSP connect-src name exact hosts
-// instead of wildcarding all outbound wss:// traffic, and pins to relays run by established
-// projects (Damus, nos.social, Coracle, Mostro) instead of trusting whichever of ~50 mostly
-// unbranded personal relays Trystero's redundancy setting happens to pick per session.
+// A curated (not the full ~50-relay default pool, so tauri.conf.json's CSP connect-src can name
+// exact hosts instead of wildcarding all outbound wss:// traffic) but deliberately *wider than
+// minimal* subset of Trystero's default community Nostr relays. Originally just 5 - widened
+// after a real outage where 2 of those 5 (relay.damus.io rate-limiting this client, and
+// relay.mostro.network refusing the WebSocket connection outright) happened simultaneously and
+// stalled every pairing/session handshake, since Trystero needs enough overlap between two
+// peers' reachable relays for the SDP exchange to complete at all. Every relay here only ever
+// carries a sha256-derived room id and an SDP blob, never the invite secret or note content, so
+// pinning to "famous" relays specifically is not a real security requirement here - having
+// *more* independent ones is what actually buys resilience against any single relay's downtime
+// or rate limiting.
 const CURATED_RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
   "wss://bucket.coracle.social",
   "wss://purplerelay.com",
   "wss://relay.mostro.network",
+  "wss://relay.mostr.pub",
+  "wss://nostr.data.haus",
+  "wss://strfry.shock.network",
+  "wss://relay.angor.io",
+  "wss://nostr.islandarea.net",
 ];
 
 // Google's long-standing public STUN endpoints - discovery of this device's own reachable
