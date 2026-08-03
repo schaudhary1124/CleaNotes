@@ -28,7 +28,6 @@ import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import {
   createCodeBlockCommand,
   insertHrCommand,
-  insertImageCommand,
   linkSchema,
   toggleEmphasisCommand,
   toggleStrongCommand,
@@ -37,13 +36,14 @@ import {
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { redoCommand as yRedoCommand, undoCommand as yUndoCommand } from "y-prosemirror";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
-import { getNoteLook, readSketch, setNoteLook, writeAttachment, writeSketch } from "../utils/fsNotes";
+import { fsAssetStore, getNoteLook, readSketch, setNoteLook, writeSketch } from "../utils/fsNotes";
+import { hashAssetBytes } from "../collab/assetStore";
+import { imageSchemaExt, type ImageWrap } from "../milkdown/imageSchemaExtensions";
 import type { CollabPluginConfig, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
 import { getSelectionState, registerMilkdownPlugins } from "../milkdown/setup";
 import { setBlockAlign, setTableColumnAlign } from "../milkdown/alignmentCommands";
 import { setSelectedImageWrap, toggleSelectedImageCrop } from "../milkdown/imageCommands";
-import { IMAGE_CROP_CHANGED_EVENT } from "../milkdown/imageView";
-import type { ImageWrap } from "../milkdown/imageSchemaExtensions";
+import { IMAGE_CROP_CHANGED_EVENT, NOTE_LOOK_CHANGED_EVENT } from "../milkdown/imageView";
 import { liftOutOfList, toggleBulletList, toggleOrderedList, toggleTaskItem } from "../milkdown/listCommands";
 import {
   addTableColumn,
@@ -87,6 +87,7 @@ import { ALIGN_OPTIONS, TableMenu } from "./TableMenu";
 import { LookDropdown } from "./LookDropdown";
 import { TextStyleDropdown } from "./TextStyleDropdown";
 import type { NoteLook, SketchStroke, SketchTool } from "../types";
+import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved";
 
@@ -520,6 +521,19 @@ function NoteEditor({
     setNoteLook(notePath, next);
   }
 
+  // Tells every image NodeView to recompute its ruled-paper alignment compensation whenever
+  // `look` changes - most importantly the very first time it resolves from "plain" (this state's
+  // initial value, before the effect above's async disk read lands) to the note's real saved
+  // preference. See NOTE_LOOK_CHANGED_EVENT's own comment in imageView.ts for the race this
+  // closes: an image's own "load" event (its normal trigger for this) can easily fire before
+  // that async read finishes, correctly no-opping against the still-default "plain" look with
+  // nothing left to retry it once the real class actually lands.
+  useEffect(() => {
+    run((ctx) => {
+      ctx.get(editorViewCtx).dom.dispatchEvent(new CustomEvent(NOTE_LOOK_CHANGED_EVENT));
+    });
+  }, [look, run]);
+
   // --- Sketch mode: ink layer state -----------------------------------
   const [strokes, setStrokes] = useState<SketchStroke[]>([]);
   const [sketchTool, setSketchTool] = useState<SketchTool>("pen");
@@ -546,6 +560,9 @@ function NoteEditor({
   const hasUserEditedRef = useRef(false);
 
   useEffect(() => {
+    // A collab session's ySketchStrokes (seeded from this same file - see hostSession.ts) is the
+    // source of truth instead while one's active - see the effect below.
+    if (collabSession?.ySketchStrokes) return;
     let cancelled = false;
     (async () => {
       const data = await readSketch(notePath);
@@ -560,9 +577,35 @@ function NoteEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Seeds `strokes` from the shared array the moment a collab session provides one (already
+  // populated by then - see hostSession.ts's/yjsBridge.ts's own seeding/snapshot-catch-up), and
+  // mirrors every later remote change (a collaborator's own stroke, most commonly) into it too.
+  // Keyed on the array's own identity, not just "a session exists": a resync (see
+  // yjsBridge.ts's JoinedSession.generation) swaps in an entirely fresh one.
+  useEffect(() => {
+    const yArr = collabSession?.ySketchStrokes;
+    if (!yArr) return;
+    setStrokes(yArr.toArray());
+    const observer = (_event: unknown, transaction: { origin: unknown }) => {
+      if (transaction.origin === SKETCH_LOCAL_ORIGIN) return; // already applied locally below
+      setStrokes(yArr.toArray());
+    };
+    yArr.observe(observer);
+    return () => yArr.unobserve(observer);
+  }, [collabSession?.ySketchStrokes]);
+
   const debouncedSaveSketch = useDebouncedCallback((next: SketchStroke[]) => {
     writeSketch(notePath, { version: 1, strokes: next });
   }, AUTOSAVE_DELAY_MS);
+
+  // Local-only notes persist by writing the whole sidecar file (debounced); a collab session
+  // persists the same way but through the shared Y.Array instead (see applyStrokesToYArray) -
+  // the owner's own hostSession.ts is what actually writes that back to disk, keeping exactly one
+  // writer for the file regardless of whether the strokes originated locally or from a guest.
+  function persistStrokes(next: SketchStroke[]) {
+    if (collabSession?.ySketchStrokes) applyStrokesToYArray(collabSession.ySketchStrokes, next);
+    else debouncedSaveSketch(next);
+  }
 
   function commitStrokes(next: SketchStroke[]) {
     hasUserEditedRef.current = true;
@@ -571,7 +614,7 @@ function NoteEditor({
     setCanUndo(true);
     setCanRedo(false);
     setStrokes(next);
-    debouncedSaveSketch(next);
+    persistStrokes(next);
   }
 
   const sketchWidth = SKETCH_TOOL_SIZES[sketchTool][sketchSizeIndex];
@@ -636,7 +679,7 @@ function NoteEditor({
     if (entry.kind === "ink") {
       redoStackRef.current.push({ kind: "ink", strokes });
       setStrokes(entry.strokes);
-      debouncedSaveSketch(entry.strokes);
+      persistStrokes(entry.strokes);
     } else {
       redoStackRef.current.push({ kind: "mark" });
       // Milkdown's history plugin isn't registered while collaborating - see setup.ts's
@@ -660,7 +703,7 @@ function NoteEditor({
     if (entry.kind === "ink") {
       undoStackRef.current.push({ kind: "ink", strokes });
       setStrokes(entry.strokes);
-      debouncedSaveSketch(entry.strokes);
+      persistStrokes(entry.strokes);
     } else {
       undoStackRef.current.push({ kind: "mark" });
       if (collabSession) {
@@ -729,11 +772,20 @@ function NoteEditor({
     [run],
   );
 
+  // Content-addressed rather than writeAttachment's old per-note uuid-named file: keying by the
+  // bytes' own hash is what lets this same image, synced back and forth with a collaborator (see
+  // assetSync.ts), dedupe onto one file instead of a fresh copy per device/session, and lets a
+  // guest with no filesystem of their own (browserImageUpload.ts) store it the identical way.
   async function insertImageFile(file: File) {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const relPath = await writeAttachment(notePath, file.name || "pasted-image.png", bytes);
-      run(callCommand(insertImageCommand.key, { src: relPath, alt: file.name }));
+      const hash = await hashAssetBytes(bytes);
+      await fsAssetStore.put(hash, bytes);
+      run((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const node = imageSchemaExt.type(ctx).create({ src: hash, alt: file.name, mime: file.type || "image/jpeg" });
+        view.dispatch(view.state.tr.replaceSelectionWith(node).scrollIntoView());
+      });
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Couldn't attach that image");
       setTimeout(() => setUploadError(null), 4000);

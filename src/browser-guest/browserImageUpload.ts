@@ -1,52 +1,72 @@
 /**
- * Converts a picked/pasted image File into a data: URI suitable for embedding directly in the
- * note's synced content - a browser guest has no local vault/filesystem to write an attachment
- * file to the way Editor.tsx's writeAttachment does, so the image's bytes themselves become the
- * `src` (see imageView.ts's `isExternal` check, which already renders a `data:`/`http(s):` src
- * as-is on the desktop side too - so an image inserted here needs no changes there to display).
+ * Converts a picked/pasted image File into raw bytes ready for content-addressed storage
+ * (idbAssetStore, since a browser guest has no local vault/filesystem the way Editor.tsx's
+ * fsAssetStore does) and P2P sync as an asset key rather than embedded inline (see assetSync.ts
+ * and imageSchemaExtensions.ts's `mime` attr).
  *
- * Raster formats (jpeg/png/webp) get downscaled/recompressed when larger than MAX_DIMENSION,
- * since the image's bytes now live inside the real-time collab document (not a side file) -
- * an unresized phone photo would otherwise multiply the sync payload every guest has to receive.
- * gif (animation would be destroyed by a canvas re-encode) and svg (already text-sized, and
- * rasterizing it would lose its vector nature) are embedded as-is.
+ * Raster formats (jpeg/png/webp) get downscaled/recompressed when larger than MAX_DIMENSION - an
+ * unresized phone photo would otherwise be multiple MB every peer that doesn't have it yet has to
+ * transfer. gif (animation would be destroyed by a canvas re-encode) and svg (already text-sized,
+ * and rasterizing it would lose its vector nature) are stored as-is.
  */
 
 const MAX_DIMENSION = 1600;
 const JPEG_QUALITY = 0.82;
 const RECOMPRESSIBLE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-function readFileAsDataUri(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("Couldn't read that file"));
-    reader.readAsDataURL(file);
-  });
+export interface UploadableImage {
+  bytes: Uint8Array;
+  mime: string;
 }
 
-function loadImageElement(dataUri: string): Promise<HTMLImageElement> {
+function loadImageElement(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("Couldn't decode that image"));
-    img.src = dataUri;
+    img.src = url;
   });
 }
 
-export async function fileToUploadDataUri(file: File): Promise<string> {
-  const original = await readFileAsDataUri(file);
-  if (!RECOMPRESSIBLE_TYPES.has(file.type)) return original;
+function canvasToBytes(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Couldn't encode that image"));
+          return;
+        }
+        blob
+          .arrayBuffer()
+          .then((buffer) => resolve(new Uint8Array(buffer)))
+          .catch(reject);
+      },
+      mime,
+      quality,
+    );
+  });
+}
 
-  const img = await loadImageElement(original);
-  const scale = Math.min(1, MAX_DIMENSION / Math.max(img.naturalWidth, img.naturalHeight));
-  if (scale >= 1) return original;
+export async function fileToUploadableImage(file: File): Promise<UploadableImage> {
+  const mime = file.type || "application/octet-stream";
+  const originalBytes = new Uint8Array(await file.arrayBuffer());
+  if (!RECOMPRESSIBLE_TYPES.has(mime)) return { bytes: originalBytes, mime };
 
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(img.naturalWidth * scale);
-  canvas.height = Math.round(img.naturalHeight * scale);
-  const context = canvas.getContext("2d");
-  if (!context) return original;
-  context.drawImage(img, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await loadImageElement(objectUrl);
+    const scale = Math.min(1, MAX_DIMENSION / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale >= 1) return { bytes: originalBytes, mime };
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    const context = canvas.getContext("2d");
+    if (!context) return { bytes: originalBytes, mime };
+    context.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const bytes = await canvasToBytes(canvas, "image/jpeg", JPEG_QUALITY);
+    return { bytes, mime: "image/jpeg" };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }

@@ -1,11 +1,13 @@
 import * as Y from "yjs";
 import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate } from "y-protocols/awareness";
 import type { Room } from "trystero/nostr";
+import type { AssetStore } from "./assetStore";
+import { createAssetChannel } from "./assetSync";
 import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
 import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabRole, FeatureFlags } from "../types";
+import type { CollabRole, FeatureFlags, SketchStroke } from "../types";
 import { DEFAULT_FEATURES } from "../utils/settings";
 
 /** Turns the wire message's plain string-keyed record back into a real FeatureFlags, filling
@@ -54,6 +56,12 @@ export interface JoinedSession {
   /** Live cursors/selections and presence - see HostedSession.awareness's own comment in
    * hostSession.ts; same "single source of truth for the UI" role on this side too. */
   awareness: Awareness;
+  /** Live ink strokes for Sketch mode - see HostedSession.ySketchStrokes's own comment
+   * (hostSession.ts) for why this needs no wire protocol of its own. */
+  ySketchStrokes: Y.Array<SketchStroke>;
+  /** Resolves an image node's `src` to its bytes - this device's local asset store first, then
+   * the owner if that misses. See HostedSession.resolveAsset's own comment. */
+  resolveAsset(key: string): Promise<Uint8Array>;
   /** False for viewers (or if the owner has the note locked at the moment of joining) - passed
    * straight through to the editor to set it read-only. Enforcement itself still lives on the
    * owner's side (hostSession.ts); this only controls this device's own UI. This is a snapshot
@@ -99,6 +107,7 @@ export function joinSession(
   role: CollabRole,
   identity: DeviceIdentity,
   displayName: string,
+  assetStore: AssetStore,
   events: JoinSessionEvents = {},
 ): Promise<JoinedSession> {
   return new Promise((resolve, reject) => {
@@ -108,6 +117,7 @@ export function joinSession(
     let currentGeneration: string | null = null;
     let ydoc = new Y.Doc();
     let yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
+    let ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
     let awareness = new Awareness(ydoc);
     // NOT setLocalStateField'd yet - see the matching comment in hostSession.ts for why this
     // waits until the relay listener below actually exists.
@@ -158,6 +168,17 @@ export function joinSession(
         const ctrl = room.makeAction<SessionCtrlMessage>("cleanotes-session-ctrl");
         const update = room.makeAction<Uint8Array>("cleanotes-session-update");
         const awarenessAction = room.makeAction<Uint8Array>("cleanotes-session-awareness");
+        // A guest only ever has the owner as a peer in this star topology, so no per-peer
+        // allowlist to check the way hostSession.ts's authorizedPeers is - anyone who made it
+        // into this signaling room already had the note's derived room password.
+        const assetChannel = createAssetChannel(room, assetStore, () => true);
+        // Set once the owner's first "hello" response (see room.onPeerJoin below) confirms who
+        // that one peer actually is - resolveAsset has nobody to ask before then, same
+        // "nothing to request from yet" gap a fresh join always has.
+        let ownerPeerId: string | null = null;
+        async function resolveAsset(key: string): Promise<Uint8Array> {
+          return assetChannel.fetch(key, ownerPeerId ? [ownerPeerId] : []);
+        }
 
         // Wires the "local edit -> broadcast to the owner" listeners onto whichever ydoc/
         // awareness are current. Called once for the pair created above, and again (against a
@@ -220,6 +241,8 @@ export function joinSession(
         function buildSession(title: string, features: Record<string, boolean>): JoinedSession {
           return {
             yXmlFragment,
+            ySketchStrokes,
+            resolveAsset,
             title,
             features: toFeatureFlags(features),
             awareness,
@@ -264,6 +287,7 @@ export function joinSession(
               teardownLocalDoc();
               ydoc = new Y.Doc();
               yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
+              ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
               awareness = new Awareness(ydoc);
               wireLocalDoc();
             }
@@ -302,7 +326,8 @@ export function joinSession(
           }
         };
 
-        room.onPeerJoin = async () => {
+        room.onPeerJoin = async (peerId) => {
+          ownerPeerId = peerId;
           const timestamp = Date.now();
           const signature = toHex(sign(identity, signedText("session", noteId, String(timestamp))));
           await ctrl.send({ type: "hello", pubKey: identity.publicKeyHex, timestamp, signature });

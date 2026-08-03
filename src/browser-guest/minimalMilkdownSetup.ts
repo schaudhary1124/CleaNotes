@@ -10,16 +10,20 @@ import type { Editor } from "@milkdown/kit/core";
 import { editorViewOptionsCtx } from "@milkdown/kit/core";
 import { ySyncPlugin, yCursorPlugin, yUndoPlugin } from "y-prosemirror";
 import type { Awareness } from "y-protocols/awareness";
-import type { XmlFragment } from "yjs";
+import type { XmlFragment, Array as YArray } from "yjs";
 import { alignmentSidecarRemark, configureAlignmentSchemas } from "../milkdown/alignmentSchemaExtensions";
 import { codeBlockExtensions, codeBlockLanguages } from "../milkdown/codeBlock";
 import { codeBlockGrips } from "../milkdown/codeBlockGrips";
+import { imageSchemaExt, imageWrapSidecarRemark } from "../milkdown/imageSchemaExtensions";
+import { imageView } from "../milkdown/imageView";
 import { taskListToggle } from "../milkdown/taskListToggle";
 import { tableCellBreakRemark, tableSchemaExtensionPlugins, tableSidecarRemark } from "../milkdown/tableSchemaExtensions";
 import { tableGrips } from "../milkdown/tableGrips";
 import { tableLineBreak } from "../milkdown/tableLineBreak";
 import { textDecorationPlugins } from "../milkdown/textDecorationMarks";
+import type { SketchStroke } from "../types";
 import { getBrowserSelectionState, type BrowserSelectionState } from "./browserSelectionState";
+import { idbAssetStore } from "./idbAssetStore";
 
 /**
  * The browser-guest build's own, deliberately small Milkdown plugin set: full-ish Markdown
@@ -29,8 +33,10 @@ import { getBrowserSelectionState, type BrowserSelectionState } from "./browserS
  * purpose: it also wires up voice notes, note-to-note linking (whose click handler imports
  * @tauri-apps/plugin-opener), and image insert/attachment writes through fsNotes.ts - all real
  * desktop features, all out of scope for "edit exactly one note, no vault, no filesystem" (see
- * the implementation plan's constraints). Image support specifically has its own deferred
- * design - see the plan's Part F - not wired up here yet.
+ * the implementation plan's constraints). Images *are* wired up (imageSchemaExt/imageView, same
+ * as setup.ts) - they're backed by idbAssetStore instead of desktop's fsAssetStore, but the
+ * schema and NodeView themselves are the exact same code, shared via imageView.ts's injectable
+ * ImageAssetResolver (see its own comment for why that split exists).
  *
  * There's also no markdown-serialization listener registered for its own sake here, unlike the
  * desktop editor: this one has no local file to autosave to. `listener`/`listenerCtx` is
@@ -44,6 +50,8 @@ export interface MinimalCollabConfig {
   yXmlFragment: XmlFragment;
   canEdit: boolean;
   awareness: Awareness;
+  ySketchStrokes?: YArray<SketchStroke>;
+  resolveAsset?: (key: string) => Promise<Uint8Array>;
 }
 
 export function registerMinimalMilkdownPlugins(
@@ -85,6 +93,8 @@ export function registerMinimalMilkdownPlugins(
     .use(tableSidecarRemark)
     .use(tableCellBreakRemark)
     .use(alignmentSidecarRemark)
+    .use(imageSchemaExt)
+    .use(imageWrapSidecarRemark)
     .use(textDecorationPlugins)
     .use(columnResizingPlugin)
     .use(tableGrips);
@@ -99,5 +109,6 @@ export function registerMinimalMilkdownPlugins(
     .use(clipboard)
     .use(trailing)
     .use(cursor)
+    .use(imageView({ store: idbAssetStore, fetchRemote: collab.resolveAsset }))
     .use(taskListToggle);
 }

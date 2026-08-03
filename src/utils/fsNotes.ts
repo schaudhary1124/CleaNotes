@@ -12,6 +12,7 @@ import {
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import { extractStudyItemsAndStrip } from "./markdownParser";
+import type { AssetStore } from "../collab/assetStore";
 import type {
   CollabAcl,
   FolderEntry,
@@ -934,3 +935,30 @@ export async function writeAttachment(
 export function readAttachment(relPath: string): Promise<Uint8Array> {
   return readFile(fullPath(relPath), { baseDir: BASE_DIR });
 }
+
+// Flat, note-independent home for content-addressed assets (see fsAssetStore below) - unlike
+// writeAttachment's per-note-folder uuid-named files, a hash-keyed asset isn't tied to the note
+// that first inserted it (the same image synced back and forth between owner/guest, or pasted
+// into two different notes, naturally dedupes onto one file), so it doesn't need notePath at all.
+const CAS_DIR = joinPath(ASSETS_DIR, "cas");
+
+/** Desktop's AssetStore (see src/collab/assetStore.ts) for P2P-synced image bytes. Every image
+ * inserted from now on - on desktop or by a browser guest - is stored here, keyed by its own
+ * content hash; `writeAttachment`'s per-note uuid-named files remain only for images already on
+ * disk from before this existed. `get` accepts either key shape: a legacy relative path (always
+ * contains "/") resolves exactly like `readAttachment` always has, a bare content hash resolves
+ * under CAS_DIR. */
+export const fsAssetStore: AssetStore = {
+  async get(key: string): Promise<Uint8Array | null> {
+    const relPath = key.includes("/") ? key : joinPath(CAS_DIR, key);
+    try {
+      return await readFile(fullPath(relPath), { baseDir: BASE_DIR });
+    } catch {
+      return null;
+    }
+  },
+  async put(key: string, bytes: Uint8Array): Promise<void> {
+    await mkdir(fullPath(CAS_DIR), { baseDir: BASE_DIR, recursive: true });
+    await writeFile(fullPath(joinPath(CAS_DIR, key)), bytes, { baseDir: BASE_DIR });
+  },
+};

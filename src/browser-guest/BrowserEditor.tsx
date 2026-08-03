@@ -1,19 +1,23 @@
-import { useCallback, useRef, useState } from "react";
-import { Editor as MilkdownEditor, defaultValueCtx, rootCtx } from "@milkdown/kit/core";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Editor as MilkdownEditor, defaultValueCtx, editorViewCtx, rootCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
-import { callCommand } from "@milkdown/kit/utils";
-import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import type { JoinedSession } from "../collab/yjsBridge";
 import { usePresence } from "../collab/usePresence";
+import { hashAssetBytes } from "../collab/assetStore";
+import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync";
+import { imageSchemaExt } from "../milkdown/imageSchemaExtensions";
 import { applySettingsToDocument, loadSettings, saveSettings } from "../utils/settings";
-import type { AppSettings, NoteLook } from "../types";
+import type { AppSettings, NoteLook, SketchStroke, SketchTool } from "../types";
 import { registerMinimalMilkdownPlugins } from "./minimalMilkdownSetup";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserSettingsPopover } from "./BrowserSettingsPopover";
 import { loadNoteLook, saveNoteLook } from "./noteLook";
-import { fileToUploadDataUri } from "./browserImageUpload";
+import { fileToUploadableImage } from "./browserImageUpload";
+import { idbAssetStore } from "./idbAssetStore";
 import type { BrowserSelectionState } from "./browserSelectionState";
+import { SketchLayer } from "../components/SketchLayer";
+import { DEFAULT_SKETCH_COLOR, SKETCH_TOOL_SIZES, SketchToolbar } from "../components/SketchToolbar";
 
 interface BrowserEditorProps {
   session: JoinedSession;
@@ -40,6 +44,80 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // --- Sketch mode: ink layer state - mirrors Editor.tsx's, minus that file's Tier-A
+  // gesture-to-text-decoration classification (out of scope here) and disk persistence (a guest
+  // has no vault entry for this note; the shared array below, via session.ySketchStrokes, is the
+  // only copy that exists on this device - see hostSession.ts, which is what actually persists it
+  // to the owner's `.sketch.json`). ---
+  const [sketchMode, setSketchMode] = useState(false);
+  const [strokes, setStrokes] = useState<SketchStroke[]>([]);
+  const [sketchTool, setSketchTool] = useState<SketchTool>("pen");
+  const [sketchColor, setSketchColor] = useState(DEFAULT_SKETCH_COLOR);
+  const [sketchSizeIndex, setSketchSizeIndex] = useState(0);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const undoStackRef = useRef<SketchStroke[][]>([]);
+  const redoStackRef = useRef<SketchStroke[][]>([]);
+
+  // Seeds `strokes` from the shared array (already populated by the time JoinedSession resolves -
+  // see yjsBridge.ts) and mirrors every later remote change into it too - same pattern as
+  // Editor.tsx's identical effect, see SKETCH_LOCAL_ORIGIN's own comment for why local edits
+  // don't loop back through here.
+  useEffect(() => {
+    const yArr = session.ySketchStrokes;
+    setStrokes(yArr.toArray());
+    const observer = (_event: unknown, transaction: { origin: unknown }) => {
+      if (transaction.origin === SKETCH_LOCAL_ORIGIN) return;
+      setStrokes(yArr.toArray());
+    };
+    yArr.observe(observer);
+    return () => yArr.unobserve(observer);
+  }, [session.ySketchStrokes]);
+
+  function commitStrokes(next: SketchStroke[]) {
+    undoStackRef.current.push(strokes);
+    redoStackRef.current = [];
+    setCanUndo(true);
+    setCanRedo(false);
+    setStrokes(next);
+    applyStrokesToYArray(session.ySketchStrokes, next);
+  }
+
+  function handleAddStroke(stroke: SketchStroke) {
+    commitStrokes([...strokes, stroke]);
+  }
+
+  function handleEraseStrokes(ids: string[]) {
+    const idSet = new Set(ids);
+    commitStrokes(strokes.filter((s) => !idSet.has(s.id)));
+  }
+
+  function handleClearSketch() {
+    commitStrokes([]);
+  }
+
+  function handleUndo() {
+    const prev = undoStackRef.current.pop();
+    if (!prev) return;
+    redoStackRef.current.push(strokes);
+    setStrokes(prev);
+    applyStrokesToYArray(session.ySketchStrokes, prev);
+    setCanUndo(undoStackRef.current.length > 0);
+    setCanRedo(true);
+  }
+
+  function handleRedo() {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(strokes);
+    setStrokes(next);
+    applyStrokesToYArray(session.ySketchStrokes, next);
+    setCanUndo(true);
+    setCanRedo(redoStackRef.current.length > 0);
+  }
+
+  const sketchWidth = SKETCH_TOOL_SIZES[sketchTool][sketchSizeIndex];
+
   const { get } = useEditor(
     (root) => {
       const editor = MilkdownEditor.make();
@@ -56,7 +134,13 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
       registerMinimalMilkdownPlugins(
         editor,
         noteId,
-        { yXmlFragment: session.yXmlFragment, canEdit, awareness: session.awareness },
+        {
+          yXmlFragment: session.yXmlFragment,
+          canEdit,
+          awareness: session.awareness,
+          ySketchStrokes: session.ySketchStrokes,
+          resolveAsset: session.resolveAsset,
+        },
         setSelectionState,
         session.features.codeBlock,
       );
@@ -72,6 +156,16 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
 
   const run = useCallback((action: (ctx: Ctx) => unknown) => get()?.action(action), [get]);
 
+  // Freezes text editing while sketch mode is active - same reasoning as Editor.tsx's identical
+  // effect (the ink canvas already owns pointer input; leaving text editing live underneath it
+  // would fight the canvas for clicks/selection).
+  useEffect(() => {
+    run((ctx) => {
+      ctx.get(editorViewCtx).setProps({ editable: () => !sketchMode });
+    });
+    if (sketchMode) window.getSelection()?.removeAllRanges();
+  }, [sketchMode, run]);
+
   function handleSelectLook(next: NoteLook) {
     setLook(next);
     saveNoteLook(noteId, next);
@@ -79,8 +173,14 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
 
   async function insertImageFile(file: File) {
     try {
-      const dataUri = await fileToUploadDataUri(file);
-      run(callCommand(insertImageCommand.key, { src: dataUri, alt: file.name }));
+      const { bytes, mime } = await fileToUploadableImage(file);
+      const hash = await hashAssetBytes(bytes);
+      await idbAssetStore.put(hash, bytes);
+      run((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const node = imageSchemaExt.type(ctx).create({ src: hash, alt: file.name, mime });
+        view.dispatch(view.state.tr.replaceSelectionWith(node).scrollIntoView());
+      });
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Couldn't attach that image");
       setTimeout(() => setUploadError(null), 4000);
@@ -109,7 +209,23 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
 
   return (
     <>
-      {canEdit && (
+      {canEdit && sketchMode && (
+        <SketchToolbar
+          tool={sketchTool}
+          onToolChange={setSketchTool}
+          color={sketchColor}
+          onColorChange={setSketchColor}
+          sizeIndex={sketchSizeIndex}
+          onSizeIndexChange={setSketchSizeIndex}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onClear={handleClearSketch}
+          onExit={() => setSketchMode(false)}
+        />
+      )}
+      {canEdit && !sketchMode && (
         <BrowserToolbar
           selectionState={selectionState}
           run={run}
@@ -118,11 +234,12 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
           codeBlockEnabled={session.features.codeBlock}
           onInsertImage={() => fileInputRef.current?.click()}
           uploadError={uploadError}
+          onToggleSketchMode={() => setSketchMode(true)}
         />
       )}
       <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
       <div
-        className={`prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${look !== "plain" ? `note-look-${look}` : ""}`}
+        className={`prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`}
       >
         {/* Must be `.prose-note`'s direct child and `position: relative` - the note-look-paper/
             index-card rule-line background (index.css) is a ::before on exactly this element,
@@ -132,6 +249,15 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
             the actual text baseline. Mirrors Editor.tsx's sketchWrapperRef div. */}
         <div className="relative min-h-full" onPasteCapture={handleEditorPaste}>
           <Milkdown />
+          <SketchLayer
+            active={canEdit && sketchMode}
+            strokes={strokes}
+            tool={sketchTool}
+            color={sketchColor}
+            width={sketchWidth}
+            onAddStroke={handleAddStroke}
+            onEraseStrokes={handleEraseStrokes}
+          />
         </div>
       </div>
     </>

@@ -25,6 +25,7 @@ import {
   deleteNote,
   ensureNotesDir,
   flattenNotes,
+  fsAssetStore,
   listNoteTree,
   listTrash,
   migrateLegacyStudyItems,
@@ -1354,6 +1355,7 @@ function App() {
               role: note.role,
               identity: currentIdentity,
               displayName: note.displayName,
+              assetStore: fsAssetStore,
             },
             {
               onStatusChange: (status) => {
@@ -1662,7 +1664,13 @@ function App() {
                     onScrolledToAnchor={() => setPendingScrollAnchor(null)}
                     collabSession={
                       activeCollabSession
-                        ? { yXmlFragment: activeCollabSession.yXmlFragment, canEdit: true, awareness: activeCollabSession.awareness }
+                        ? {
+                            yXmlFragment: activeCollabSession.yXmlFragment,
+                            canEdit: true,
+                            awareness: activeCollabSession.awareness,
+                            ySketchStrokes: activeCollabSession.ySketchStrokes,
+                            resolveAsset: activeCollabSession.resolveAsset,
+                          }
                         : undefined
                     }
                   />

@@ -3,23 +3,30 @@ import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/pr
 import { NodeSelection } from "@milkdown/kit/prose/state";
 import { imageSchema } from "@milkdown/kit/preset/commonmark";
 import { $view } from "@milkdown/kit/utils";
-import { readAttachment } from "../utils/fsNotes";
+import type { AssetStore } from "../collab/assetStore";
 import type { ImageCrop } from "./imageSchemaExtensions";
+
+/** How an image's bytes get resolved to something displayable - injected rather than imported
+ * directly so this NodeView (and the schema plugin it's paired with) can be shared verbatim
+ * between the desktop build (backed by fsAssetStore, src/utils/fsNotes.ts) and the browser-guest
+ * build (backed by idbAssetStore, src/browser-guest/idbAssetStore.ts) without either one pulling
+ * in the other's platform-specific storage - the exact thing that used to keep this file
+ * desktop-only (it imported `@tauri-apps/plugin-fs`'s readAttachment directly), see
+ * scripts/check-browser-bundle.mjs. */
+export interface ImageAssetResolver {
+  /** This device's own local cache - checked first, and where a network fetch below gets
+   * written once it succeeds, so the same image never has to be re-requested. */
+  store: AssetStore;
+  /** Best-effort fetch from a connected peer for a key `store` doesn't have - absent when
+   * there's no active collab session (nowhere to ask). See hostSession.ts's/yjsBridge.ts's
+   * resolveAsset for what backs this. */
+  fetchRemote?: (key: string) => Promise<Uint8Array>;
+}
 
 const resolvedCache = new Map<string, string>();
 
 function isExternal(src: string): boolean {
   return /^(https?:|data:)/.test(src);
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
 }
 
 function mimeFromExtension(path: string): string {
@@ -38,14 +45,21 @@ function mimeFromExtension(path: string): string {
   }
 }
 
-/** Resolves a note-relative attachment path (as stored in the .md file) to a
- * displayable data: URL, caching results the same way Preview.tsx used to. */
-async function resolveSrc(src: string): Promise<string> {
+/** Resolves an image node's `src` (a content hash, or a legacy relative attachment path) to a
+ * displayable blob: URL - the local store first, then (if a collab session provides it) a
+ * network fetch from whichever peer has it, caching either result the same way Preview.tsx used
+ * to. A blob URL rather than a base64 data: URL on purpose: the bytes stay as bytes all the way
+ * through (no ~33% base64 inflation sitting in memory for the life of the cache entry), the same
+ * efficiency-minded reasoning as keeping asset transfer itself out of the base64-heavy Yjs
+ * update stream in the first place (see assetSync.ts). */
+async function resolveSrc(src: string, mime: string | null, resolver: ImageAssetResolver): Promise<string> {
   if (!src || isExternal(src)) return src;
   const cached = resolvedCache.get(src);
   if (cached) return cached;
-  const bytes = await readAttachment(src);
-  const url = `data:${mimeFromExtension(src)};base64,${uint8ToBase64(bytes)}`;
+  let bytes = await resolver.store.get(src);
+  if (!bytes && resolver.fetchRemote) bytes = await resolver.fetchRemote(src);
+  if (!bytes) throw new Error(`Couldn't load image: ${src}`);
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime ?? mimeFromExtension(src) }));
   resolvedCache.set(src, url);
   return url;
 }
@@ -59,6 +73,14 @@ export const IMAGE_CROP_TOGGLE_EVENT = "plainotes:image-crop-toggle";
  * button can mirror its pressed state without any of this living in node
  * attrs (crop-mode-active is transient UI state, not part of the document). */
 export const IMAGE_CROP_CHANGED_EVENT = "plainotes:image-crop-changed";
+/** Broadcast on the ProseMirror view's DOM (see Editor.tsx's `look`-change effect) whenever the
+ * note-look preference finishes loading or changes - every image NodeView hears it and
+ * recomputes its ruled-paper alignment compensation (see applyAlignmentFix). Needed because
+ * `look` loads asynchronously (starts "plain", then loads the real saved preference from disk -
+ * see Editor.tsx), so an image's own "load" event - the normal trigger for that recompute - can
+ * easily fire *before* the "paper"/"index-card" class is even on `.prose-note` yet, correctly
+ * no-opping at the time but with nothing else left to ever retry it once the class does land. */
+export const NOTE_LOOK_CHANGED_EVENT = "plainotes:note-look-changed";
 
 /** Smallest frame dimension (CSS px) a resize handle will shrink an image
  * to - below this the handles themselves would no longer fit on the image. */
@@ -221,16 +243,19 @@ class ImageNodeView implements NodeView {
   private node: ProseNode;
   private view: EditorView;
   private getPos: () => number | undefined;
+  private resolver: ImageAssetResolver;
   private resizeDrag: ResizeDrag | null = null;
   private cropDrag: CropDrag | null = null;
   private cropSession: CropSession | null = null;
   private positionDrag: PositionDrag | null = null;
   private suppressNextClick = false;
+  private alignRaf: number | null = null;
 
-  constructor(node: ProseNode, view: EditorView, getPos: () => number | undefined) {
+  constructor(node: ProseNode, view: EditorView, getPos: () => number | undefined, resolver: ImageAssetResolver) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
+    this.resolver = resolver;
 
     this.dom = document.createElement("span");
     this.dom.className = "milkdown-image-view";
@@ -271,14 +296,89 @@ class ImageNodeView implements NodeView {
     this.view.dom.addEventListener(IMAGE_CROP_TOGGLE_EVENT, this.onCropToggleRequested);
     document.addEventListener("keydown", this.onKeyDown);
 
+    // Recomputes alignment once the natural (unsized) image's real dimensions are known - see
+    // applyAlignmentFix's own comment for why this has to be event-driven rather than a
+    // continuously-observed size, and scheduleAlignmentFix's for why "load" alone (not e.g. a
+    // ResizeObserver on `img`) is what's wired up here.
+    this.img.addEventListener("load", this.scheduleAlignmentFix);
+    // See NOTE_LOOK_CHANGED_EVENT's own comment - closes the race between the note-look
+    // preference's async load and this image's own (often faster) "load" event above.
+    this.view.dom.addEventListener(NOTE_LOOK_CHANGED_EVENT, this.scheduleAlignmentFix);
+
     this.applyWrap(node);
     this.applyLayout(node);
     this.applyPosition(node);
     this.renderImg(node);
+    this.scheduleAlignmentFix();
   }
 
   private applyWrap(node: ProseNode) {
     this.dom.dataset.wrap = (node.attrs.wrap as string) || "inline";
+  }
+
+  /** note-look-paper/index-card quantize every text line's height to a whole
+   * multiple of `--rule` (see index.css) so the ruled background never drifts
+   * out from under the text - but an image sitting in flow isn't clamped by
+   * `line-height` the way text is: once it's taller than one rule row, its
+   * containing block's real height stops being a multiple of `--rule` and
+   * every line below permanently desyncs from the background. Rather than
+   * resizing the image (which the user explicitly chose), reserve extra
+   * bottom space so the image's *total* footprint (its own CSS margin plus
+   * this compensation) rounds up to the next rule line, the same "whole
+   * multiples of --rule" contract index.css's own text rule already relies on.
+   *
+   * Applied to `dom` (this NodeView's own root), never to `block` (the containing paragraph):
+   * `block` belongs to ProseMirror, not to this NodeView, and `ignoreMutation` below only
+   * suppresses its own DOM observer for mutations within `dom`'s subtree - writing to an
+   * ancestor it doesn't own is a mutation ProseMirror doesn't know is "expected", so it
+   * reconciles by rebuilding the surrounding content, which recreates this NodeView, which
+   * reruns this fix, which mutates `block` again - an infinite reconstruct loop (confirmed
+   * during development: thousands of rebuilds within a couple of minutes). Compensating on
+   * `dom` itself keeps every mutation inside the one boundary ProseMirror already knows to
+   * leave alone, while still growing `block`'s rendered height the same way: an inline-level
+   * child's own bottom margin is part of the line box its containing paragraph is sized to.
+   *
+   * Deliberately called only from specific mutation points (initial load, resize-drag release,
+   * crop commit/cancel, a remote collaborator's resize landing in `update`, the note-look
+   * preference resolving) rather than driven by a live ResizeObserver watching the image's own
+   * box. A ResizeObserver here is a real feedback hazard: an unsized image capped by
+   * `max-width: 100%` can be narrowed by its own column (e.g. a vertical scrollbar toggling on
+   * because this very fix just grew the note's total height), which shrinks the image's
+   * rendered height, which this fix would then react to by shrinking the margin, which shrinks
+   * the total height, which removes the scrollbar, which widens the column, which grows the
+   * image back - an unbounded loop that pins the image's own size in constant flux (breaking
+   * click/resize-drag targeting) and fights the user's own scroll position every frame. Firing
+   * only at the handful of moments a size change is a deliberate, one-shot user (or synced)
+   * action avoids ever entering that loop too. */
+  private scheduleAlignmentFix = () => {
+    if (this.alignRaf != null) return;
+    this.alignRaf = requestAnimationFrame(() => {
+      this.alignRaf = null;
+      this.applyAlignmentFix();
+    });
+  };
+
+  private applyAlignmentFix() {
+    // `above` images are position:absolute (out of flow) - nothing for them
+    // to desync from.
+    if (((this.node.attrs.wrap as string) || "inline") === "above") return;
+    const block = this.dom.closest<HTMLElement>("p, li, blockquote, h1, h2, h3");
+    const proseNote = this.dom.closest<HTMLElement>(".prose-note");
+    if (!block || !proseNote) return;
+    const gridded = proseNote.classList.contains("note-look-paper") || proseNote.classList.contains("note-look-index-card");
+    if (!gridded) {
+      if (this.dom.style.marginBottom) this.dom.style.marginBottom = "";
+      return;
+    }
+    const rule = parseFloat(getComputedStyle(proseNote).getPropertyValue("--rule"));
+    if (!rule) return;
+    // Clear any previous compensation first - both to fall back to the CSS-defined base margin
+    // (`.milkdown-image-view`'s `margin: 0.4em 0`, read below) before adding to it, and so a
+    // shrink (e.g. cropping the image shorter) doesn't keep stale extra padding.
+    this.dom.style.marginBottom = "";
+    const baseMarginBottom = parseFloat(getComputedStyle(this.dom).marginBottom) || 0;
+    const remainder = block.getBoundingClientRect().height % rule;
+    if (remainder >= 0.5) this.dom.style.marginBottom = `${baseMarginBottom + (rule - remainder)}px`;
   }
 
   /** Positions `dom` from committed `x`/`y` node attrs - only meaningful for
@@ -352,7 +452,8 @@ class ImageNodeView implements NodeView {
       this.img.src = src;
       return;
     }
-    resolveSrc(src)
+    const mime = (node.attrs.mime as string | null | undefined) ?? null;
+    resolveSrc(src, mime, this.resolver)
       .then((resolved) => {
         this.img.src = resolved;
       })
@@ -369,7 +470,12 @@ class ImageNodeView implements NodeView {
     // While a resize or crop is live, the DOM is ahead of whatever's still
     // committed to the node - don't stomp it back to the stale attrs on
     // every incidental update.
-    if (!this.resizeDrag && !this.cropSession) this.applyLayout(node);
+    if (!this.resizeDrag && !this.cropSession) {
+      this.applyLayout(node);
+      // Covers a remote collaborator's resize/crop landing here via Yjs - this device's own
+      // resize/crop already schedules this itself at the point that drag/session ends.
+      this.scheduleAlignmentFix();
+    }
     if (!this.positionDrag) this.applyPosition(node);
     if (srcChanged) {
       this.renderImg(node);
@@ -396,8 +502,11 @@ class ImageNodeView implements NodeView {
     document.removeEventListener("keydown", this.onKeyDown);
     document.removeEventListener("pointerdown", this.onDocPointerDownDuringCrop, true);
     this.view.dom.removeEventListener(IMAGE_CROP_TOGGLE_EVENT, this.onCropToggleRequested);
+    this.view.dom.removeEventListener(NOTE_LOOK_CHANGED_EVENT, this.scheduleAlignmentFix);
     this.restoreTextSelection();
     this.clearSelectionGuard();
+    this.img.removeEventListener("load", this.scheduleAlignmentFix);
+    if (this.alignRaf != null) cancelAnimationFrame(this.alignRaf);
   }
 
   // Dragging a handle starts its gesture on a `contenteditable="false"`
@@ -540,6 +649,7 @@ class ImageNodeView implements NodeView {
     // of the transaction round-trip, so there's no visible snap back to the
     // pre-drag size while `update` is still pending.
     this.layoutFrame(width, height, cropOf(this.node));
+    this.scheduleAlignmentFix();
     const pos = this.getPos();
     if (pos === undefined) return;
     this.view.dispatch(this.view.state.tr.setNodeMarkup(pos, undefined, { ...this.node.attrs, width, height }));
@@ -846,6 +956,7 @@ class ImageNodeView implements NodeView {
     const height = Math.round(fullHeight * (1 - crop.cropTop - crop.cropBottom));
     this.exitCropMode();
     this.layoutFrame(width, height, crop);
+    this.scheduleAlignmentFix();
     const pos = this.getPos();
     if (pos === undefined) return;
     this.view.dispatch(
@@ -856,6 +967,7 @@ class ImageNodeView implements NodeView {
   private cancelCrop() {
     this.exitCropMode();
     this.applyLayout(this.node);
+    this.scheduleAlignmentFix();
   }
 
   private dispatchCropChanged(cropping: boolean) {
@@ -883,6 +995,11 @@ class ImageNodeView implements NodeView {
   }
 }
 
-export const imageView = $view(imageSchema.node, () => {
-  return ((node, view, getPos) => new ImageNodeView(node, view, getPos)) as NodeViewConstructor;
-});
+/** Same "config in, plugin out" factory shape as codeBlockGrips/voiceNoteGrips (setup.ts) - see
+ * ImageAssetResolver's own comment for why the resolver is threaded in here rather than imported
+ * directly. */
+export function imageView(resolver: ImageAssetResolver) {
+  return $view(imageSchema.node, () => {
+    return ((node, view, getPos) => new ImageNodeView(node, view, getPos, resolver)) as NodeViewConstructor;
+  });
+}

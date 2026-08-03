@@ -46,6 +46,15 @@ function heightOf(node: { attrs: { height?: unknown } }): number | null {
   return typeof height === "number" && Number.isFinite(height) ? height : null;
 }
 
+/** The image bytes' MIME type - only meaningful when `src` is a content-addressed asset key
+ * (see assetStore.ts) rather than a legacy relative attachment path or an external/data URL,
+ * since only that form needs it to reconstruct a displayable Blob from raw bytes with no
+ * extension to infer it from (see imageView.ts's resolveSrc). Null for every other src form. */
+function mimeOf(node: { attrs: { mime?: unknown } }): string | null {
+  const mime = node.attrs.mime;
+  return typeof mime === "string" && mime.length > 0 ? mime : null;
+}
+
 /** Free-position offsets (CSS px, relative to the note's positioned
  * ancestor) for `wrap: "above"` images once dragged - see imageView.ts's
  * position-drag handling. Null until the image has ever been dragged, so it
@@ -87,8 +96,8 @@ function isCropped(crop: ImageCrop): boolean {
 /** Parses the sidecar's `;key=value;key=value` tail into a plain object,
  * ignoring keys it doesn't recognize (forward-compat with older sidecars,
  * and a soft landing if a future version adds more). */
-function parseExtras(tail: string): { width?: number; height?: number; crop?: number[]; x?: number; y?: number } {
-  const extras: { width?: number; height?: number; crop?: number[]; x?: number; y?: number } = {};
+function parseExtras(tail: string): { width?: number; height?: number; crop?: number[]; x?: number; y?: number; mime?: string } {
+  const extras: { width?: number; height?: number; crop?: number[]; x?: number; y?: number; mime?: string } = {};
   for (const part of tail.split(";")) {
     if (!part) continue;
     const eq = part.indexOf("=");
@@ -99,6 +108,7 @@ function parseExtras(tail: string): { width?: number; height?: number; crop?: nu
     else if (key === "height") extras.height = Number(value);
     else if (key === "x") extras.x = Number(value);
     else if (key === "y") extras.y = Number(value);
+    else if (key === "mime") extras.mime = value;
     else if (key === "crop") {
       const parts = value.split(",").map(Number);
       if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) extras.crop = parts;
@@ -139,6 +149,7 @@ export const imageSchemaExt = imageSchema.extendSchema((prev) => (ctx) => {
       cropTop: { default: 0 },
       cropRight: { default: 0 },
       cropBottom: { default: 0 },
+      mime: { default: null },
     },
     // Spelled out (rather than the base's `...node.attrs` spread) so the
     // custom attrs don't leak onto the rendered <img> as literal HTML
@@ -176,6 +187,7 @@ export const imageSchemaExt = imageSchema.extendSchema((prev) => (ctx) => {
           cropTop: (data.cropTop as number | undefined) ?? 0,
           cropRight: (data.cropRight as number | undefined) ?? 0,
           cropBottom: (data.cropBottom as number | undefined) ?? 0,
+          mime: (data.mime as string | undefined) ?? null,
         });
       },
     },
@@ -189,13 +201,15 @@ export const imageSchemaExt = imageSchema.extendSchema((prev) => (ctx) => {
         const x = xOf(node);
         const y = yOf(node);
         const crop = cropOf(node);
-        if (wrap === "inline" && width === null && height === null && x === null && y === null && !isCropped(crop))
+        const mime = mimeOf(node);
+        if (wrap === "inline" && width === null && height === null && x === null && y === null && !isCropped(crop) && !mime)
           return;
         let extras = "";
         if (width !== null) extras += `;width=${Math.round(width)}`;
         if (height !== null) extras += `;height=${Math.round(height)}`;
         if (x !== null) extras += `;x=${Math.round(x)}`;
         if (y !== null) extras += `;y=${Math.round(y)}`;
+        if (mime) extras += `;mime=${mime}`;
         if (isCropped(crop)) {
           extras += `;crop=${[crop.cropLeft, crop.cropTop, crop.cropRight, crop.cropBottom]
             .map((n) => n.toFixed(4))
@@ -233,6 +247,7 @@ function processImageWrapSidecars(children: MdastNode[] | undefined) {
         ...(extras.height !== undefined ? { height: extras.height } : {}),
         ...(extras.x !== undefined ? { x: extras.x } : {}),
         ...(extras.y !== undefined ? { y: extras.y } : {}),
+        ...(extras.mime !== undefined ? { mime: extras.mime } : {}),
         ...(extras.crop
           ? {
               cropLeft: extras.crop[0],

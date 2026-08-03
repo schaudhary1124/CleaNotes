@@ -1,5 +1,6 @@
 import {
   Bold,
+  Brush,
   Code,
   Highlighter,
   ImagePlus,
@@ -42,6 +43,9 @@ interface BrowserToolbarProps {
   codeBlockEnabled: boolean;
   onInsertImage: () => void;
   uploadError: string | null;
+  /** Hidden entirely (not just disabled) for a viewer, matching onInsertImage's own affordance -
+   * see BrowserEditor.tsx, which only renders this whole toolbar at all when canEdit. */
+  onToggleSketchMode: () => void;
 }
 
 /** The browser-guest build's formatting toolbar - structurally the same subset of
@@ -58,6 +62,7 @@ export function BrowserToolbar({
   codeBlockEnabled,
   onInsertImage,
   uploadError,
+  onToggleSketchMode,
 }: BrowserToolbarProps) {
   const emphasisGroup: ToolbarAction[] = [
     { icon: Bold, label: "Bold", action: () => run((ctx) => callCommand(toggleStrongCommand.key)(ctx)), isActive: selectionState.bold },
@@ -173,6 +178,16 @@ export function BrowserToolbar({
           <Code size={14} />
         </button>
       )}
+      <button
+        type="button"
+        onClick={onToggleSketchMode}
+        title="Sketch on this note"
+        aria-label="Toggle sketch mode"
+        aria-pressed="false"
+        className="btn-ghost h-7 w-7 shrink-0"
+      >
+        <Brush size={14} />
+      </button>
       <div className="divider mx-1 h-5 w-px shrink-0" />
       <LookDropdown look={look} onSelect={onSelectLook} />
       {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}

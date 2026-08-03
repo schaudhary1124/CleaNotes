@@ -591,9 +591,25 @@ input,
 }
 .prose-note.note-look-paper hr,
 .prose-note.note-look-index-card hr {
-  /* hr's own rendered height is its 2px border-top; split the rest of one
-     rule unit evenly above/below so it still contributes exactly --rule. */
-  margin: calc((var(--rule) - 2px) / 2) 0;
+  /* The base rule's line is a border-*top*, which always renders at the very top edge of the
+     box - padding can only push it down together with a border-*bottom* switched in below;
+     padding-top alone against a top border does nothing, since border comes before padding in
+     the box model (margin, border, padding, content, top to bottom) and so is never affected by
+     it. Flipping to border-bottom (with border-top turned back off) lets padding-top push it
+     down to the middle of the row instead of leaving it sitting right at the row's top edge,
+     flush against the ruled line above. */
+  border-top: none;
+  border-bottom: 2px solid var(--border-strong);
+  padding-top: calc((var(--rule) - 2px) / 2);
+  /* Reserve the rest of one rule unit as bottom margin only (never top) so this still
+     contributes exactly --rule total. Bottom-only is deliberate, not just simpler: adjoining
+     margins between two in-flow siblings collapse to whichever is *larger*, not their sum - two
+     hrs (or an hr next to a code block, see codeBlockGrips.ts's identical bottom-only rule) back
+     to back would otherwise lose one side's reserved space to that collapse and break the grid
+     for everything after. With every grid-aware block using only margin-bottom, the previous
+     block's margin-top is always 0, so max(ownMarginBottom, 0) - what actually collapses - never
+     loses anything. */
+  margin: 0 0 calc((var(--rule) - 2px) / 2) 0;
 }
 
 .prose-note h1 { font-size: 1.6em; font-weight: 700; margin: 0.4em 0 0.3em; }
@@ -659,6 +675,16 @@ input,
   max-height: 800px;
   /* ~350px of visible code under the ~34px tools bar. */
   height: 384px;
+}
+/* Height varies (native resize, height/min-height/max-height above), so unlike hr's fixed 2px
+   there's no constant to reserve at build time - codeBlockGrips.ts's applyGridAlignment measures
+   the live rendered height and sets margin-bottom to round it up to the next --rule multiple.
+   margin-top: 0 is what makes that safe against two of these (or one of these next to a
+   grid-aware hr) sitting back to back - see the hr rule's own comment for why bottom-only
+   margins are what keeps adjoining-margin collapse from losing either side's reserved space. */
+.prose-note.note-look-paper .milkdown-code-block,
+.prose-note.note-look-index-card .milkdown-code-block {
+  margin-top: 0;
 }
 .prose-note .milkdown-code-block.selected {
   outline: 2px solid rgb(var(--accent-rgb) / 0.5);

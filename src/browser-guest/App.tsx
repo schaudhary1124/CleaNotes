@@ -5,6 +5,7 @@ import { loadOrCreateIdentity } from "../collab/browserIdentity";
 import { maintainGuestSession, type ManagedGuestSession } from "../collab/guestSessionSupervisor";
 import type { JoinedSession } from "../collab/yjsBridge";
 import type { CollabRole } from "../types";
+import { idbAssetStore } from "./idbAssetStore";
 import { PinEntry } from "./PinEntry";
 import { BrowserEditor } from "./BrowserEditor";
 
@@ -91,7 +92,7 @@ export function BrowserGuestApp() {
     setSession(null);
     setStatus("connecting");
     const managed = maintainGuestSession(
-      { noteId: link.payload.noteId, ownerPubKey: link.payload.ownerPubKey, role, identity, displayName },
+      { noteId: link.payload.noteId, ownerPubKey: link.payload.ownerPubKey, role, identity, displayName, assetStore: idbAssetStore },
       {
         onStatusChange: (next) => {
           if (next === "connected") {

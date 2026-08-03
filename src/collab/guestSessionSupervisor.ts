@@ -1,3 +1,4 @@
+import type { AssetStore } from "./assetStore";
 import { joinSession, SessionDeniedError, type JoinedSession } from "./yjsBridge";
 import type { DeviceIdentity } from "./identity";
 import type { CollabRole } from "../types";
@@ -23,6 +24,9 @@ export interface ManagedGuestSessionParams {
   role: CollabRole;
   identity: DeviceIdentity;
   displayName: string;
+  /** Backs this guest's local image cache - fsAssetStore (desktop) or idbAssetStore (browser
+   * guest) - see assetStore.ts. */
+  assetStore: AssetStore;
 }
 
 export interface ManagedGuestSessionCallbacks {
@@ -69,7 +73,7 @@ export function maintainGuestSession(
   function connect() {
     if (stopped) return;
     callbacks.onStatusChange("connecting");
-    joinSession(params.noteId, params.ownerPubKey, params.role, params.identity, params.displayName, {
+    joinSession(params.noteId, params.ownerPubKey, params.role, params.identity, params.displayName, params.assetStore, {
       onCanEditChanged: callbacks.onCanEditChange,
       onEnded: (reason) => {
         session = null;

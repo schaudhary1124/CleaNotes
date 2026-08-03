@@ -87,7 +87,13 @@ export function SharedNoteView({ note, session, status, canEdit, onBack }: Share
             voiceNotesEnabled={false}
             noteChoices={[]}
             onNavigateToNoteLink={noop}
-            collabSession={{ yXmlFragment: session.yXmlFragment, canEdit, awareness: session.awareness }}
+            collabSession={{
+              yXmlFragment: session.yXmlFragment,
+              canEdit,
+              awareness: session.awareness,
+              ySketchStrokes: session.ySketchStrokes,
+              resolveAsset: session.resolveAsset,
+            }}
           />
         ) : (
           <div className="text-secondary flex h-full items-center justify-center text-sm">

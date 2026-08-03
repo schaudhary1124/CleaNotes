@@ -522,7 +522,20 @@ class CodeBlockGripsView implements PluginView {
   // repositionAll() call. A block's own outer size never changes when that
   // happens (its height is fixed by CSS), so ResizeObserver never fires for
   // it - this instead watches the block's subtree directly for that mount.
-  private mutationObserver = new MutationObserver(() => this.repositionAll());
+  private mutationObserver = new MutationObserver(() => {
+    this.repositionAll();
+    // The mutation this fires for (CodeMirror/the Vue-rendered `.tools` bar replacing the
+    // placeholder - see this field's own comment above) can land before the browser has actually
+    // finished layout for that newly-inserted content, most noticeably right after a fresh mount
+    // (e.g. switching back to a tab whose note has a code block: the async IntersectionObserver
+    // mount above and this note's own Editor mount land close together, and the immediate
+    // repositionAll() call above can read stale metrics for exactly one frame in that race) -
+    // a plain click was enough to "fix" it because *any* later transaction re-runs repositionAll
+    // once layout has caught up. Doing that follow-up pass ourselves, once layout has actually
+    // settled, means a click is never required: repositionAll is cheap and idempotent, so the
+    // redundant call in the already-fine case costs nothing.
+    requestAnimationFrame(() => this.repositionAll());
+  });
   // Restoring expandedBlockPositions only makes sense once, right at mount - re-checking on
   // every later sync() (e.g. after a doc-changing edit) risks matching a since-deleted block's
   // old position against an unrelated new one that happens to land at the same offset.
@@ -794,6 +807,46 @@ class CodeBlockGripsView implements PluginView {
     return toFixedRect(block, container.getBoundingClientRect());
   }
 
+  /** Reserves extra bottom margin on a code block so its *total* footprint (it varies with the
+   * user's own native resize-drag, unlike hr's fixed 2px - see index.css's own comment on the
+   * `margin-top: 0` rule this builds on) rounds up to the next `--rule` line, the same
+   * "whole-multiples-of-rule" contract imageView.ts's applyAlignmentFix already keeps for images.
+   * Mutates the block's own element only (never an ancestor) for the identical reason that one
+   * documents: this is called from repositionAll, already proven safe to run from here (it
+   * already sets other style/custom-property values directly on tracked blocks, e.g.
+   * setExpanded's `--cb-rect-*`), so staying inside that same boundary avoids reopening that
+   * class of bug rather than introducing a new one. */
+  private applyGridAlignment(block: HTMLElement, isExpanded: boolean) {
+    if (isExpanded) {
+      // Fixed-position and out of flow while expanded (see .cb-expanded in index.css) - nothing
+      // to stay aligned with until it collapses back into flow.
+      if (block.style.marginBottom) block.style.marginBottom = "";
+      return;
+    }
+    const proseNote = block.closest<HTMLElement>(".prose-note");
+    if (!proseNote) return;
+    const gridded = proseNote.classList.contains("note-look-paper") || proseNote.classList.contains("note-look-index-card");
+    if (!gridded) {
+      if (block.style.marginBottom) block.style.marginBottom = "";
+      return;
+    }
+    const rule = parseFloat(getComputedStyle(proseNote).getPropertyValue("--rule"));
+    if (!rule) return;
+    // Clear any previous compensation first - both to fall back to the CSS base margin-bottom
+    // (0.8em, read below) before adding to it, and so a shrink (the user dragging the block
+    // shorter) doesn't keep stale extra padding from a taller previous size.
+    block.style.marginBottom = "";
+    const baseMarginBottom = parseFloat(getComputedStyle(block).marginBottom) || 0;
+    // Unlike imageView.ts's applyAlignmentFix - which measures the image's *containing
+    // paragraph*, whose own rendered height already includes the image's margin because an
+    // inline-block child's margins contribute to its parent's line-box height - a code block is
+    // a block-level sibling with no such wrapper, and getBoundingClientRect() never includes an
+    // element's own margin regardless. baseMarginBottom has to be added in by hand here so the
+    // remainder is computed against the block's *actual total* footprint, not just its border box.
+    const remainder = (block.getBoundingClientRect().height + baseMarginBottom) % rule;
+    if (remainder >= 0.5) block.style.marginBottom = `${baseMarginBottom + (rule - remainder)}px`;
+  }
+
   private repositionAll() {
     if (!this.host) return;
 
@@ -808,6 +861,7 @@ class CodeBlockGripsView implements PluginView {
     const hostRect = this.host.getBoundingClientRect();
     this.buttons.forEach((btns, block) => {
       const isExpanded = block === this.expandedBlock;
+      this.applyGridAlignment(block, isExpanded);
       // Anchor to the tools bar itself (not the block) so the buttons land
       // exactly in the Copy button's old slot regardless of the tools bar's
       // padding/height, which are set in CSS rather than known here.

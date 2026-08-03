@@ -2,12 +2,13 @@ import * as Y from "yjs";
 import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { canEdit, getAcl, touchLastSeen } from "./acl";
+import { createAssetChannel } from "./assetSync";
 import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
 import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabAcl, FeatureFlags } from "../types";
-import { readNote, titleFromNotePath } from "../utils/fsNotes";
+import type { CollabAcl, FeatureFlags, SketchStroke } from "../types";
+import { fsAssetStore, readNote, readSketch, titleFromNotePath, writeSketch } from "../utils/fsNotes";
 import { parseMarkdownToProseMirrorDoc } from "../milkdown/headlessParse";
 
 /**
@@ -67,6 +68,17 @@ export interface HostedSession {
    * yXmlFragment, and also the single source of truth the UI reads to show "who's here" (see
    * usePresence in Header.tsx/SharedNoteView.tsx) rather than a separately-tracked list. */
   awareness: Awareness;
+  /** Live ink strokes for Sketch mode - a second shared type on the same Y.Doc as yXmlFragment,
+   * so it rides the exact same welcome-snapshot catch-up and update batching/broadcast with no
+   * separate wire protocol. Seeded from the note's `.sketch.json` sidecar (see fsNotes.ts) below,
+   * and mirrored back to it on every change - the file stays the durable source of truth for
+   * strokes the same way the `.md` file already is for yXmlFragment. */
+  ySketchStrokes: Y.Array<SketchStroke>;
+  /** Resolves an image node's `src` (a content hash, or a legacy relative attachment path) to its
+   * bytes - checks this device's own disk first, then asks whichever connected collaborator(s)
+   * have it (see assetSync.ts). Passed through to the image NodeView (imageView.ts) as its
+   * network fallback when a plain local lookup misses. */
+  resolveAsset(key: string): Promise<Uint8Array>;
   /** Re-reads the ACL immediately (bypassing the usual ~2s cache) and pushes a live "state" or
    * "revoked" notice to any connected peer whose access actually changed - call right after a
    * grant/revoke/lock action succeeds. Purely a promptness optimization for *connected* peers;
@@ -95,6 +107,7 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
   const generation = crypto.randomUUID();
   const ydoc = new Y.Doc();
   const yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
+  const ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
   // Destroyed automatically when ydoc is (see y-protocols/awareness.js: it registers its own
   // `doc.on('destroy', ...)` cleanup) - no separate teardown needed in close() below.
   const awareness = new Awareness(ydoc);
@@ -115,6 +128,8 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
     const doc = await parseMarkdownToProseMirrorDoc(onDiskContent, notePath);
     prosemirrorToYXmlFragment(doc, yXmlFragment);
   }
+  const onDiskSketch = await readSketch(notePath);
+  if (onDiskSketch && onDiskSketch.strokes.length > 0) ySketchStrokes.push(onDiskSketch.strokes);
 
   const { roomId, password } = await deriveSessionRoom(acl.noteId);
   const room = await joinTrysteroRoom(password, roomId);
@@ -136,6 +151,23 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
   }
 
   const authorizedPeers = new Map<string, { pubKey: string; limiter: RateLimiter; lastKnownCanEdit: boolean }>();
+
+  const assetChannel = createAssetChannel(room, fsAssetStore, (peerId) => authorizedPeers.has(peerId));
+  async function resolveAsset(key: string): Promise<Uint8Array> {
+    return assetChannel.fetch(key, [...authorizedPeers.keys()]);
+  }
+
+  // Debounced the same way Editor.tsx's own sketch autosave already is (see its
+  // debouncedSaveSketch) - a live stroke fires many small Y.Array ops per second while drawing,
+  // and the file only needs to reflect wherever the ink ends up, not every intermediate point.
+  let sketchSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  ySketchStrokes.observe(() => {
+    if (sketchSaveTimer) clearTimeout(sketchSaveTimer);
+    sketchSaveTimer = setTimeout(() => {
+      sketchSaveTimer = null;
+      void writeSketch(notePath, { version: 1, strokes: ySketchStrokes.toArray() });
+    }, 500);
+  });
 
   ctrl.onMessage = async (message, { peerId }) => {
     if (message.type !== "hello") return;
@@ -336,6 +368,8 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
 
   return {
     yXmlFragment,
+    ySketchStrokes,
+    resolveAsset,
     awareness,
     notifyAclChanged,
     close: () => {
@@ -358,6 +392,11 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
       if (contentBatchTimer) {
         clearTimeout(contentBatchTimer);
         contentBatchTimer = null;
+      }
+      if (sketchSaveTimer) {
+        clearTimeout(sketchSaveTimer);
+        sketchSaveTimer = null;
+        void writeSketch(notePath, { version: 1, strokes: ySketchStrokes.toArray() });
       }
       setTimeout(() => {
         room.leave();

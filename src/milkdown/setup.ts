@@ -16,7 +16,7 @@ import { TextSelection } from "@milkdown/kit/prose/state";
 import { isInTable } from "@milkdown/kit/prose/tables";
 import { ySyncPlugin, yCursorPlugin, yUndoPlugin } from "y-prosemirror";
 import type { Awareness } from "y-protocols/awareness";
-import type { XmlFragment } from "yjs";
+import type { XmlFragment, Array as YArray } from "yjs";
 import { getBlockAlign, getTableCellAlign } from "./alignmentCommands";
 import { alignmentSidecarRemark, configureAlignmentSchemas, type BlockAlign } from "./alignmentSchemaExtensions";
 import { codeBlockExtensions, codeBlockLanguages } from "./codeBlock";
@@ -25,6 +25,8 @@ import { getSelectedImageWrap } from "./imageCommands";
 import { imageSchemaExt, imageWrapSidecarRemark, type ImageWrap } from "./imageSchemaExtensions";
 import { imageView } from "./imageView";
 import { getListState, type ListState } from "./listCommands";
+import { fsAssetStore } from "../utils/fsNotes";
+import type { SketchStroke } from "../types";
 import { taskListToggle } from "./taskListToggle";
 import { configureVoiceNoteSchemas, voiceSidecarRemark } from "./voiceNoteSchemaExtensions";
 import { voiceNoteGrips } from "./voiceNoteGrips";
@@ -109,6 +111,14 @@ export interface CollabPluginConfig {
    * only so a caller mid-transition (e.g. the moment a session ends) can't be forced to
    * fabricate one; in practice both hostSession and joinSession always provide it. */
   awareness?: Awareness;
+  /** Live ink strokes for Sketch mode - see HostedSession.ySketchStrokes/JoinedSession's own
+   * comment. Optional the same way `awareness` is; also simply absent for callers (like
+   * SharedNoteView.tsx today) that don't wire up Sketch mode at all. */
+  ySketchStrokes?: YArray<SketchStroke>;
+  /** Resolves an image node's `src` against a connected peer when this device's own local asset
+   * store doesn't have it yet - see HostedSession.resolveAsset's own comment. Passed straight
+   * through to imageView.ts's ImageAssetResolver as `fetchRemote`. */
+  resolveAsset?: (key: string) => Promise<Uint8Array>;
 }
 
 /** Assembles the full Milkdown plugin set used by the note editor: GFM +
@@ -265,7 +275,7 @@ export function registerMilkdownPlugins(
     .use(clipboard)
     .use(trailing)
     .use(cursor)
-    .use(imageView)
+    .use(imageView({ store: fsAssetStore, fetchRemote: collabSession?.resolveAsset }))
     .use(taskListToggle)
     // The margin "add voice note"/pill affordance and its recording handling - see
     // voiceNoteGrips.ts. Needs `notePath` (for writeAttachment when a recording is saved), which
