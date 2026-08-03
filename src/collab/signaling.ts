@@ -99,6 +99,22 @@ async function getIceServers(): Promise<RTCIceServer[]> {
 }
 
 async function roomConfig(password: string): Promise<JoinRoomConfig> {
+  // Starts STUN-only and is upgraded to the real TURN mix in place, once fetchTurnIceServers
+  // resolves, rather than blocking room-join on it below - Trystero re-reads this exact array by
+  // reference at the moment each peer connection actually negotiates (confirmed in its source:
+  // `new RTCPeerConnection({..., ...rtcConfig})` inside peer.mjs, called from initPeer well after
+  // room-join, once a peer has actually been found via the relay), never a snapshot taken at
+  // joinRoom() call time - so mutating its contents in place still reaches any peer negotiated
+  // from this point on. Blocking on the TURN fetch first (as this used to do) meant every
+  // connection attempt burned up to ICE_FETCH_TIMEOUT_MS off the relay handshake's own share of
+  // callers' overall connect budget (redeemBrowserPin's 15s, redeemInvite's/joinSession's own)
+  // before a single relay socket had even opened - the actual bottleneck under real-world relay
+  // flakiness, and something ICE servers can't help with at all until a peer is already found.
+  const iceServers: RTCIceServer[] = [...FALLBACK_ICE_SERVERS];
+  void getIceServers().then((servers) => {
+    iceServers.length = 0;
+    iceServers.push(...servers);
+  });
   return {
     appId: APP_ID,
     password,
@@ -107,7 +123,7 @@ async function roomConfig(password: string): Promise<JoinRoomConfig> {
     // comment) - Trystero's own console.warn for these isn't actionable by the person using the
     // app and would just read as an alarming error in production, so it's suppressed here.
     relayConfig: { urls: CURATED_RELAYS, warnOnRelayFailure: false },
-    rtcConfig: { iceServers: await getIceServers() },
+    rtcConfig: { iceServers },
   };
 }
 
