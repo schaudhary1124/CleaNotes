@@ -114,6 +114,17 @@ export function BrowserToolbar({
 
   return (
     <div className="border-subtle flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b px-3">
+      <button
+        type="button"
+        onClick={onToggleSketchMode}
+        title="Sketch on this note"
+        aria-label="Toggle sketch mode"
+        aria-pressed="false"
+        className="btn-ghost h-7 w-7 shrink-0"
+      >
+        <Brush size={14} />
+      </button>
+      <div className="divider mx-1 h-5 w-px shrink-0" />
       <TextStyleDropdown
         blockStyle={selectionState.blockStyle}
         onSelect={(style) =>
@@ -178,16 +189,6 @@ export function BrowserToolbar({
           <Code size={14} />
         </button>
       )}
-      <button
-        type="button"
-        onClick={onToggleSketchMode}
-        title="Sketch on this note"
-        aria-label="Toggle sketch mode"
-        aria-pressed="false"
-        className="btn-ghost h-7 w-7 shrink-0"
-      >
-        <Brush size={14} />
-      </button>
       <div className="divider mx-1 h-5 w-px shrink-0" />
       <LookDropdown look={look} onSelect={onSelectLook} />
       {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}

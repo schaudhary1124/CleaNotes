@@ -7,6 +7,7 @@ import { usePresence } from "../collab/usePresence";
 import { hashAssetBytes } from "../collab/assetStore";
 import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync";
 import { imageSchemaExt } from "../milkdown/imageSchemaExtensions";
+import { NOTE_LOOK_CHANGED_EVENT } from "../milkdown/imageView";
 import { applySettingsToDocument, loadSettings, saveSettings } from "../utils/settings";
 import type { AppSettings, NoteLook, SketchStroke, SketchTool } from "../types";
 import { registerMinimalMilkdownPlugins } from "./minimalMilkdownSetup";
@@ -155,6 +156,18 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   );
 
   const run = useCallback((action: (ctx: Ctx) => unknown) => get()?.action(action), [get]);
+
+  // Tells every image NodeView to recompute its ruled-paper alignment compensation whenever
+  // `look` changes - mirrors Editor.tsx's identical effect (see NOTE_LOOK_CHANGED_EVENT's own
+  // comment in imageView.ts). `look` itself loads synchronously here (loadNoteLook reads
+  // localStorage, not an async disk read - see noteLook.ts), so this doesn't close that exact
+  // race Editor.tsx has; it's here so switching "Paper"/"Index card" mid-session (handleSelectLook
+  // below) still recomputes already-mounted images, the same as it does on desktop.
+  useEffect(() => {
+    run((ctx) => {
+      ctx.get(editorViewCtx).dom.dispatchEvent(new CustomEvent(NOTE_LOOK_CHANGED_EVENT));
+    });
+  }, [look, run]);
 
   // Freezes text editing while sketch mode is active - same reasoning as Editor.tsx's identical
   // effect (the ink canvas already owns pointer input; leaving text editing live underneath it
