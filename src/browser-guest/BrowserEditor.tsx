@@ -122,10 +122,17 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
       )}
       <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
       <div
-        onPasteCapture={handleEditorPaste}
         className={`prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${look !== "plain" ? `note-look-${look}` : ""}`}
       >
-        <Milkdown />
+        {/* Must be `.prose-note`'s direct child and `position: relative` - the note-look-paper/
+            index-card rule-line background (index.css) is a ::before on exactly this element,
+            positioned absolutely against it. Without a positioned ancestor here, that ::before
+            falls back to the page's root containing block instead - painting behind the title
+            bar/toolbar too, and phased against the wrong top edge so it no longer lines up with
+            the actual text baseline. Mirrors Editor.tsx's sketchWrapperRef div. */}
+        <div className="relative min-h-full" onPasteCapture={handleEditorPaste}>
+          <Milkdown />
+        </div>
       </div>
     </>
   );

@@ -41,7 +41,31 @@ export type SessionCtrlMessage =
   // closed `interface` (however boolean-valued every one of its fields is) doesn't
   // automatically do - see yjsBridge.ts's toFeatureFlags for where this gets turned back into
   // a real, defaulted FeatureFlags.
-  | { type: "welcome"; signature: string; title: string; features: Record<string, boolean> }
+  | {
+      type: "welcome";
+      // Identifies which hostSession() call produced this welcome (and its embedded snapshot) -
+      // a fresh random id assigned once per call, since each call seeds an entirely new,
+      // independently-constructed Y.Doc from disk (see hostSession.ts's own comment on why).
+      // The guest compares this against whatever generation it's already on: the same value
+      // means nothing actually changed (a harmless repeat "hello"/"welcome", safe to ignore);
+      // a different value means the owner's document was recreated from scratch, and the
+      // guest's existing local Y.Doc must be discarded and rebuilt from this snapshot, never
+      // merged into - two independently-seeded Y.Docs for "the same" note are not the same CRDT
+      // structure, and merging them duplicates every node onto the page (see yjsBridge.ts's
+      // handling of this field for the full story of the bug this fixes).
+      generation: string;
+      // The owner's full current document state (Y.encodeStateAsUpdateV2), hex-encoded so it
+      // fits this JSON-shaped message (Trystero's makeAction<T> requires T to be a plain
+      // JsonValue when it isn't itself a raw binary payload - a Uint8Array nested inside an
+      // object field doesn't qualify, same constraint noted on `features` below). Sent inline
+      // with "welcome" itself rather than as a separate `update` message beforehand: `ctrl` and
+      // `update` are different named actions, with no guarantee they arrive in the order they
+      // were sent, so a separate pre-welcome update risked losing that race.
+      snapshot: string;
+      signature: string;
+      title: string;
+      features: Record<string, boolean>;
+    }
   | { type: "denied"; reason?: string }
   // Pushed to an already-connected peer when their role or the note's lock state changes -
   // lets their UI reflect it immediately instead of only finding out once they try to type

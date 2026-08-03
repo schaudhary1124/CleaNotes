@@ -69,7 +69,12 @@ export function SharedNoteView({ note, session, status, canEdit, onBack }: Share
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl">
         {session ? (
           <Editor
-            key={`${canEdit}`}
+            // Includes session.generation so a resync (owner restarted hosting without this
+            // guest connection ever dropping - see yjsBridge.ts's JoinedSession.generation)
+            // remounts the editor bound to the fresh yXmlFragment/awareness below, instead of an
+            // already-mounted instance silently going stale against objects that no longer
+            // receive updates.
+            key={`${canEdit}:${session.generation}`}
             notePath={`__shared__/${note?.noteId ?? "unknown"}.md`}
             initialContent=""
             onChange={noop}

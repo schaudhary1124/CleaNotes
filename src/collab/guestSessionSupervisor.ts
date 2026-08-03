@@ -80,6 +80,13 @@ export function maintainGuestSession(
           scheduleRetry();
         }
       },
+      // The owner's device restarted hosting while this connection never actually dropped from
+      // here - a fresh JoinedSession (new generation, see its own comment) replaces the old one
+      // outright, same callback as a normal connect uses, so callers already re-render off it.
+      onResynced: (resynced) => {
+        session = resynced;
+        callbacks.onSessionChange(resynced);
+      },
     })
       .then((started) => {
         if (stopped) {

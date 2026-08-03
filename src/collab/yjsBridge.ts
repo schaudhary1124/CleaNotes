@@ -59,6 +59,13 @@ export interface JoinedSession {
    * owner's side (hostSession.ts); this only controls this device's own UI. This is a snapshot
    * as of connect time - see onCanEditChanged in JoinSessionEvents for live updates. */
   canEdit: boolean;
+  /** Identifies which hostSession() call this session's content currently reflects - see
+   * sessionProtocol.ts's "welcome".generation. Changes on a resync (see onResynced below) even
+   * though the outer connection never actually dropped from this device's perspective. Callers
+   * that bind an editor directly to yXmlFragment/awareness (Editor.tsx/BrowserEditor.tsx) should
+   * key that editor's mount on this value, so a resync gets a genuinely fresh editor bound to
+   * the fresh fields instead of an already-mounted one going stale. */
+  generation: string;
   close(): void;
 }
 
@@ -69,6 +76,15 @@ export interface JoinSessionEvents {
    * owner just isn't hosting right now (note closed/app quit) and may resume later. Either way
    * the session is now dead; callers should tear down their UI. */
   onEnded?: (reason: "revoked" | "closing") => void;
+  /** The owner's device restarted hosting this note (a fresh, independently-seeded Y.Doc - see
+   * hostSession.ts) while this connection never actually dropped from this device's
+   * perspective - most commonly the note's sharing/ACL state changing, or the owner's app
+   * restarting. A brand new JoinedSession (fresh yXmlFragment/awareness/generation) is handed
+   * over rather than the existing one being mutated in place: see JoinedSession.generation's own
+   * comment for why the old local Y.Doc is discarded outright, never merged into. Callers must
+   * switch to the new session's fields (and remount whatever editor is bound to them) rather
+   * than keep using the old one. */
+  onResynced?: (session: JoinedSession) => void;
 }
 
 /**
@@ -87,9 +103,12 @@ export function joinSession(
 ): Promise<JoinedSession> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const ydoc = new Y.Doc();
-    const yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
-    const awareness = new Awareness(ydoc);
+    // Which hostSession() generation the fields below currently reflect - null until the first
+    // welcome arrives. See JoinedSession.generation's own comment.
+    let currentGeneration: string | null = null;
+    let ydoc = new Y.Doc();
+    let yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
+    let awareness = new Awareness(ydoc);
     // NOT setLocalStateField'd yet - see the matching comment in hostSession.ts for why this
     // waits until the relay listener below actually exists.
     let room: Room | null = null;
@@ -101,14 +120,22 @@ export function joinSession(
     // Same reasoning as awarenessBroadcastTimer above, for the content-update batch window.
     let contentBatchTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Tears down the *local* Y.Doc/timers only - never the room/connection itself (a resync
+    // needs the room to stay joined; only fail()/close()/revoked/closing below also leave it).
+    const teardownLocalDoc = () => {
+      if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
+      if (contentBatchTimer) clearTimeout(contentBatchTimer);
+      awarenessBroadcastTimer = null;
+      contentBatchTimer = null;
+      ydoc.destroy(); // also destroys `awareness` - see hostSession.ts's identical comment
+    };
+
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
-      if (contentBatchTimer) clearTimeout(contentBatchTimer);
+      teardownLocalDoc();
       room?.leave();
-      ydoc.destroy();
       reject(err);
     };
 
@@ -132,6 +159,56 @@ export function joinSession(
         const update = room.makeAction<Uint8Array>("cleanotes-session-update");
         const awarenessAction = room.makeAction<Uint8Array>("cleanotes-session-awareness");
 
+        // Wires the "local edit -> broadcast to the owner" listeners onto whichever ydoc/
+        // awareness are current. Called once for the pair created above, and again (against a
+        // brand new pair) on every resync - see ctrl.onMessage's "welcome" handling below, and
+        // JoinedSession.generation's own comment for why a resync needs an entirely fresh pair
+        // rather than reusing this one.
+        function wireLocalDoc() {
+          // Same leading + trailing batching as hostSession.ts's ydoc.on("updateV2") - see its
+          // comment for the full reasoning. Only one peer to exclude here (the owner), not a
+          // set, since a guest only ever talks to the owner in this star topology.
+          let pendingContentUpdates: Uint8Array[] = [];
+          ydoc.on("updateV2", (change: Uint8Array, origin: unknown) => {
+            if (origin === "remote") return; // don't echo back what the owner just sent us
+            if (!contentBatchTimer) {
+              void update.send(change);
+              contentBatchTimer = setTimeout(() => {
+                contentBatchTimer = null;
+                if (pendingContentUpdates.length === 0) return;
+                const merged =
+                  pendingContentUpdates.length === 1 ? pendingContentUpdates[0] : Y.mergeUpdatesV2(pendingContentUpdates);
+                pendingContentUpdates = [];
+                void update.send(merged);
+              }, CONTENT_BATCH_WINDOW_MS);
+              return;
+            }
+            pendingContentUpdates.push(change);
+          });
+
+          // Coalesced the same way as hostSession.ts's awareness broadcast - see that one's
+          // comment for why (essentially every keystroke plus an internal ~15s library
+          // heartbeat, each otherwise triggering its own immediate WebRTC send).
+          let pendingAwarenessClientIds = new Set<number>();
+          awareness.on(
+            "update",
+            ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
+              if (origin === "remote") return;
+              for (const id of [...added, ...updated, ...removed]) pendingAwarenessClientIds.add(id);
+              if (!awarenessBroadcastTimer) {
+                awarenessBroadcastTimer = setTimeout(() => {
+                  awarenessBroadcastTimer = null;
+                  const clientIds = [...pendingAwarenessClientIds];
+                  pendingAwarenessClientIds = new Set();
+                  if (clientIds.length === 0) return;
+                  void awarenessAction.send(encodeAwarenessUpdate(awareness, clientIds));
+                }, AWARENESS_BROADCAST_THROTTLE_MS);
+              }
+            },
+          );
+        }
+        wireLocalDoc();
+
         update.onMessage = (data) => {
           if (data instanceof Uint8Array) Y.applyUpdateV2(ydoc, data, "remote");
         };
@@ -140,38 +217,74 @@ export function joinSession(
           if (data instanceof Uint8Array) applyAwarenessUpdate(awareness, data, "remote");
         };
 
+        function buildSession(title: string, features: Record<string, boolean>): JoinedSession {
+          return {
+            yXmlFragment,
+            title,
+            features: toFeatureFlags(features),
+            awareness,
+            canEdit: role === "editor",
+            generation: currentGeneration!,
+            close: () => {
+              teardownLocalDoc();
+              room?.leave();
+            },
+          };
+        }
+
         ctrl.onMessage = (message) => {
-          // Messages that only make sense before the initial handshake resolves.
-          if (!settled) {
-            if (message.type === "welcome") {
-              let validWelcome = false;
-              try {
-                validWelcome = verifySignature(fromHex(message.signature), signedText("welcome", noteId, identity.publicKeyHex), ownerPubKey);
-              } catch {
-                validWelcome = false;
-              }
-              if (!validWelcome) {
-                fail(new Error("Could not verify the owner's identity - refusing to sync."));
-                return;
-              }
+          if (message.type === "welcome") {
+            let validWelcome = false;
+            try {
+              validWelcome = verifySignature(fromHex(message.signature), signedText("welcome", noteId, identity.publicKeyHex), ownerPubKey);
+            } catch {
+              validWelcome = false;
+            }
+            if (!validWelcome) {
+              fail(new Error("Could not verify the owner's identity - refusing to sync."));
+              return;
+            }
+            // Same generation as what we already have - a harmless repeat welcome (e.g. a
+            // redundant "hello" - see hostSession.ts, which doesn't bother distinguishing these
+            // itself), nothing to rebuild.
+            if (settled && message.generation === currentGeneration) return;
+
+            let snapshot: Uint8Array;
+            try {
+              snapshot = fromHex(message.snapshot);
+            } catch {
+              return; // malformed - keep whatever we already have rather than corrupt it
+            }
+
+            if (settled) {
+              // A resync: the owner's device restarted hosting this note (a fresh,
+              // independently-seeded Y.Doc) while this connection never actually dropped from
+              // here. See JoinedSession.generation's own comment for why the existing local doc
+              // is discarded outright, never merged into.
+              teardownLocalDoc();
+              ydoc = new Y.Doc();
+              yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
+              awareness = new Awareness(ydoc);
+              wireLocalDoc();
+            }
+            Y.applyUpdateV2(ydoc, snapshot, "remote");
+            currentGeneration = message.generation;
+
+            if (!settled) {
               settled = true;
               clearTimeout(timer);
-              resolve({
-                yXmlFragment,
-                title: message.title,
-                features: toFeatureFlags(message.features),
-                awareness,
-                canEdit: role === "editor",
-                close: () => {
-                  if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
-                  if (contentBatchTimer) clearTimeout(contentBatchTimer);
-                  room?.leave();
-                  ydoc.destroy();
-                },
-              });
-            } else if (message.type === "denied") {
-              fail(new SessionDeniedError(message.reason ?? "Access to this note was denied."));
+              resolve(buildSession(message.title, message.features));
+            } else {
+              // Deferred until now, same reasoning as the original onPeerJoin comment: this
+              // fresh Awareness starts out empty, so presence needs re-announcing on it.
+              awareness.setLocalStateField("user", { name: displayName, color: colorForPubKey(identity.publicKeyHex) });
+              events.onResynced?.(buildSession(message.title, message.features));
             }
+            return;
+          }
+
+          if (!settled) {
+            if (message.type === "denied") fail(new SessionDeniedError(message.reason ?? "Access to this note was denied."));
             return;
           }
 
@@ -179,57 +292,15 @@ export function joinSession(
           if (message.type === "state") {
             events.onCanEditChanged?.(message.canEdit);
           } else if (message.type === "revoked") {
-            if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
-            if (contentBatchTimer) clearTimeout(contentBatchTimer);
+            teardownLocalDoc();
             room?.leave();
-            ydoc.destroy();
             events.onEnded?.("revoked");
           } else if (message.type === "closing") {
-            if (awarenessBroadcastTimer) clearTimeout(awarenessBroadcastTimer);
-            if (contentBatchTimer) clearTimeout(contentBatchTimer);
+            teardownLocalDoc();
             room?.leave();
-            ydoc.destroy();
             events.onEnded?.("closing");
           }
         };
-
-        // Same leading + trailing batching as hostSession.ts's ydoc.on("updateV2") - see its
-        // comment for the full reasoning. Only one peer to exclude here (the owner), not a set,
-        // since a guest only ever talks to the owner in this star topology.
-        let pendingContentUpdates: Uint8Array[] = [];
-        ydoc.on("updateV2", (change: Uint8Array, origin: unknown) => {
-          if (origin === "remote") return; // don't echo back what the owner just sent us
-          if (!contentBatchTimer) {
-            void update.send(change);
-            contentBatchTimer = setTimeout(() => {
-              contentBatchTimer = null;
-              if (pendingContentUpdates.length === 0) return;
-              const merged = pendingContentUpdates.length === 1 ? pendingContentUpdates[0] : Y.mergeUpdatesV2(pendingContentUpdates);
-              pendingContentUpdates = [];
-              void update.send(merged);
-            }, CONTENT_BATCH_WINDOW_MS);
-            return;
-          }
-          pendingContentUpdates.push(change);
-        });
-
-        // Coalesced the same way as hostSession.ts's awareness broadcast - see that one's
-        // comment for why (essentially every keystroke plus an internal ~15s library heartbeat,
-        // each otherwise triggering its own immediate WebRTC send).
-        let pendingAwarenessClientIds = new Set<number>();
-        awareness.on("update", ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
-          if (origin === "remote") return;
-          for (const id of [...added, ...updated, ...removed]) pendingAwarenessClientIds.add(id);
-          if (!awarenessBroadcastTimer) {
-            awarenessBroadcastTimer = setTimeout(() => {
-              awarenessBroadcastTimer = null;
-              const clientIds = [...pendingAwarenessClientIds];
-              pendingAwarenessClientIds = new Set();
-              if (clientIds.length === 0) return;
-              void awarenessAction.send(encodeAwarenessUpdate(awareness, clientIds));
-            }, AWARENESS_BROADCAST_THROTTLE_MS);
-          }
-        });
 
         room.onPeerJoin = async () => {
           const timestamp = Date.now();

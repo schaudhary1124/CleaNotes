@@ -110,6 +110,21 @@ export function BrowserGuestApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role, link]);
 
+  // Escape hatch for a guest stuck retrying forever: a remembered role only ever gets cleared
+  // automatically on an explicit "denied" from the owner's device (see onDenied above) - but if
+  // this note currently has no active collaborators at all (e.g. access lapsed, or the PIN was
+  // regenerated since this device last redeemed it), nothing is hosting a session to deny
+  // anything, so joinSession just times out silently forever with no way back to PinEntry on its
+  // own. Offered once status has actually gone "offline" (not on the first "connecting" attempt,
+  // which may just be a normal reconnect) so the user isn't asked to abandon a connection that
+  // might still succeed a moment later.
+  function handleReenterPin() {
+    if (link.ok) localStorage.removeItem(rememberedRoleKey(link.payload.noteId));
+    setSession(null);
+    setPinError(null);
+    setRole(null);
+  }
+
   async function handleSubmitPin(pin: string, name: string) {
     if (!link.ok || submittingPin) return;
     const trimmedName = name.trim();
@@ -149,7 +164,11 @@ export function BrowserGuestApp() {
             onSubmit={(pin, name) => void handleSubmitPin(pin, name)}
           />
         ) : status === "connected" && session ? (
-          <BrowserEditor session={session} canEdit={canEdit} noteId={link.payload.noteId} />
+          // Keyed on session.generation so a resync (owner restarted hosting without this
+          // connection ever dropping - see yjsBridge.ts's JoinedSession.generation) remounts
+          // BrowserEditor bound to the fresh yXmlFragment/awareness, instead of an
+          // already-mounted instance going stale against objects that no longer receive updates.
+          <BrowserEditor key={session.generation} session={session} canEdit={canEdit} noteId={link.payload.noteId} />
         ) : (
           <CenteredMessage
             title={status === "connecting" ? "Connecting…" : "Waiting for the owner to be online"}
@@ -159,6 +178,7 @@ export function BrowserGuestApp() {
                 : "This note only syncs while its owner's CleaNotes app is open. You'll connect automatically the moment they're back online."
             }
             spinner={status === "connecting"}
+            onReenterPin={status === "offline" ? handleReenterPin : undefined}
           />
         )}
       </div>
@@ -166,12 +186,30 @@ export function BrowserGuestApp() {
   );
 }
 
-function CenteredMessage({ title, body, spinner }: { title: string; body: string; spinner?: boolean }) {
+function CenteredMessage({
+  title,
+  body,
+  spinner,
+  onReenterPin,
+}: {
+  title: string;
+  body: string;
+  spinner?: boolean;
+  /** Shown as a small secondary action beneath `body` when set - see handleReenterPin's own
+   * comment for why this only ever appears once a connection attempt has actually gone
+   * "offline", not on the very first "connecting" pass. */
+  onReenterPin?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center">
       {spinner && <Loader2 size={22} className="text-tertiary animate-spin" />}
       <p className="text-primary text-base font-semibold">{title}</p>
       <p className="text-secondary max-w-xs text-sm leading-relaxed">{body}</p>
+      {onReenterPin && (
+        <button type="button" onClick={onReenterPin} className="btn-ghost mt-1 h-8 rounded-lg px-3 text-xs">
+          Not connecting? Enter the PIN again
+        </button>
+      )}
     </div>
   );
 }

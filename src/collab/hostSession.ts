@@ -89,6 +89,10 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
   const acl = await getAcl(notePath);
   if (!acl) throw new Error("This note has never been shared.");
 
+  // Identifies this specific call/Y.Doc instance to guests - see sessionProtocol.ts's "welcome"
+  // field for why, and yjsBridge.ts for how a guest uses it to tell a harmless repeat welcome
+  // apart from a real resync after this device restarted hosting.
+  const generation = crypto.randomUUID();
   const ydoc = new Y.Doc();
   const yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
   // Destroyed automatically when ydoc is (see y-protocols/awareness.js: it registers its own
@@ -157,13 +161,19 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
       limiter: { tokens: RATE_LIMIT_BUCKET_SIZE, lastRefill: Date.now() },
       lastKnownCanEdit: canEdit(latest, message.pubKey),
     });
-    await update.send(Y.encodeStateAsUpdateV2(ydoc), { target: peerId });
     const welcomeSignature = toHex(sign(identity, signedText("welcome", acl.noteId, message.pubKey)));
     await ctrl.send(
-      // Cast, not a lie: FeatureFlags' actual runtime shape (string keys, boolean values) is a
-      // valid Record<string, boolean> - TS just doesn't infer that automatically for a closed
-      // interface without an explicit index signature (see sessionProtocol.ts's own comment).
-      { type: "welcome", signature: welcomeSignature, title: titleFromNotePath(notePath), features: features as unknown as Record<string, boolean> },
+      {
+        type: "welcome",
+        generation,
+        snapshot: toHex(Y.encodeStateAsUpdateV2(ydoc)),
+        signature: welcomeSignature,
+        title: titleFromNotePath(notePath),
+        // Cast, not a lie: FeatureFlags' actual runtime shape (string keys, boolean values) is a
+        // valid Record<string, boolean> - TS just doesn't infer that automatically for a closed
+        // interface without an explicit index signature (see sessionProtocol.ts's own comment).
+        features: features as unknown as Record<string, boolean>,
+      },
       { target: peerId },
     );
     // Catch the newly-joined peer up on everyone already present, not just future changes.
