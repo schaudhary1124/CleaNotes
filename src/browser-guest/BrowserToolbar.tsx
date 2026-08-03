@@ -2,6 +2,7 @@ import {
   Bold,
   Code,
   Highlighter,
+  ImagePlus,
   Italic,
   List,
   ListChecks,
@@ -39,6 +40,8 @@ interface BrowserToolbarProps {
   look: NoteLook;
   onSelectLook: (look: NoteLook) => void;
   codeBlockEnabled: boolean;
+  onInsertImage: () => void;
+  uploadError: string | null;
 }
 
 /** The browser-guest build's formatting toolbar - structurally the same subset of
@@ -47,7 +50,15 @@ interface BrowserToolbarProps {
  * Reuses the same extracted sub-components (ToolbarButtonGroup/TableMenu/LookDropdown/
  * TextStyleDropdown - see src/components/) and the same command functions Editor.tsx calls,
  * just without that file's sketch-mode/note-linking/voice-note-specific wiring around them. */
-export function BrowserToolbar({ selectionState, run, look, onSelectLook, codeBlockEnabled }: BrowserToolbarProps) {
+export function BrowserToolbar({
+  selectionState,
+  run,
+  look,
+  onSelectLook,
+  codeBlockEnabled,
+  onInsertImage,
+  uploadError,
+}: BrowserToolbarProps) {
   const emphasisGroup: ToolbarAction[] = [
     { icon: Bold, label: "Bold", action: () => run((ctx) => callCommand(toggleStrongCommand.key)(ctx)), isActive: selectionState.bold },
     { icon: Italic, label: "Italic", action: () => run((ctx) => callCommand(toggleEmphasisCommand.key)(ctx)), isActive: selectionState.italic },
@@ -142,6 +153,15 @@ export function BrowserToolbar({ selectionState, run, look, onSelectLook, codeBl
       >
         <DividerIcon size={14} />
       </button>
+      <button
+        type="button"
+        onClick={onInsertImage}
+        title="Insert image"
+        aria-label="Insert image"
+        className="btn-ghost h-7 w-7 shrink-0"
+      >
+        <ImagePlus size={14} />
+      </button>
       {codeBlockEnabled && (
         <button
           type="button"
@@ -155,6 +175,7 @@ export function BrowserToolbar({ selectionState, run, look, onSelectLook, codeBl
       )}
       <div className="divider mx-1 h-5 w-px shrink-0" />
       <LookDropdown look={look} onSelect={onSelectLook} />
+      {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}
     </div>
   );
 }

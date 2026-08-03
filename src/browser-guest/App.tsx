@@ -138,7 +138,7 @@ export function BrowserGuestApp() {
 
   return (
     <div className="h-screen w-screen">
-      <div className="app-shell flex h-full w-full flex-col overflow-hidden">
+      <div className="app-shell @container flex h-full w-full flex-col overflow-hidden">
         {!link.ok ? (
           <CenteredMessage title="This link looks broken" body={link.message} />
         ) : role === null ? (

@@ -1,6 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Editor as MilkdownEditor, defaultValueCtx, rootCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
+import { callCommand } from "@milkdown/kit/utils";
+import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import type { JoinedSession } from "../collab/yjsBridge";
 import { usePresence } from "../collab/usePresence";
@@ -10,6 +12,7 @@ import { registerMinimalMilkdownPlugins } from "./minimalMilkdownSetup";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserSettingsPopover } from "./BrowserSettingsPopover";
 import { loadNoteLook, saveNoteLook } from "./noteLook";
+import { fileToUploadDataUri } from "./browserImageUpload";
 import type { BrowserSelectionState } from "./browserSelectionState";
 
 interface BrowserEditorProps {
@@ -34,6 +37,8 @@ const EMPTY_SELECTION_STATE: BrowserSelectionState = {
 function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   const [selectionState, setSelectionState] = useState(EMPTY_SELECTION_STATE);
   const [look, setLook] = useState<NoteLook>(() => loadNoteLook(noteId));
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { get } = useEditor(
     (root) => {
@@ -72,6 +77,36 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     saveNoteLook(noteId, next);
   }
 
+  async function insertImageFile(file: File) {
+    try {
+      const dataUri = await fileToUploadDataUri(file);
+      run(callCommand(insertImageCommand.key, { src: dataUri, alt: file.name }));
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Couldn't attach that image");
+      setTimeout(() => setUploadError(null), 4000);
+    }
+  }
+
+  function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) void insertImageFile(file);
+  }
+
+  // Same capture-phase + stopPropagation reasoning as Editor.tsx's handleEditorPaste: without
+  // this, a pasted image falls through to the browser's native contenteditable paste, which has
+  // no sensible image representation to insert here and (per the "image.png" text this was
+  // filed against) sometimes drops in the clipboard's plain-text filename fallback instead.
+  function handleEditorPaste(e: React.ClipboardEvent) {
+    const file = Array.from(e.clipboardData.items)
+      .find((item) => item.kind === "file" && item.type.startsWith("image/"))
+      ?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void insertImageFile(file);
+  }
+
   return (
     <>
       {canEdit && (
@@ -81,9 +116,15 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
           look={look}
           onSelectLook={handleSelectLook}
           codeBlockEnabled={session.features.codeBlock}
+          onInsertImage={() => fileInputRef.current?.click()}
+          uploadError={uploadError}
         />
       )}
-      <div className={`prose-note flex-1 overflow-y-auto px-6 py-6 ${look !== "plain" ? `note-look-${look}` : ""}`}>
+      <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
+      <div
+        onPasteCapture={handleEditorPaste}
+        className={`prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${look !== "plain" ? `note-look-${look}` : ""}`}
+      >
         <Milkdown />
       </div>
     </>
@@ -109,7 +150,7 @@ export function BrowserEditor({ session, canEdit, noteId }: BrowserEditorProps) 
   }
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-3xl flex-col">
+    <div className="flex h-full w-full flex-col">
       <div className="border-subtle flex items-center justify-between border-b px-6 py-3">
         <p className="text-primary truncate text-sm font-semibold">{session.title}</p>
         <div className="flex items-center gap-2">
