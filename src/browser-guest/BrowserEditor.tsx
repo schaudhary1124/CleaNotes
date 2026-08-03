@@ -263,6 +263,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
         <div className="relative min-h-full" onPasteCapture={handleEditorPaste}>
           <Milkdown />
           <SketchLayer
+            className="absolute inset-0"
             active={canEdit && sketchMode}
             strokes={strokes}
             tool={sketchTool}
