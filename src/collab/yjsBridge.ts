@@ -5,7 +5,16 @@ import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
 import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabRole } from "../types";
+import type { CollabRole, FeatureFlags } from "../types";
+import { DEFAULT_FEATURES } from "../utils/settings";
+
+/** Turns the wire message's plain string-keyed record back into a real FeatureFlags, filling
+ * in any missing/unrecognized keys from DEFAULT_FEATURES - same defensive merge loadSettings()
+ * already does for its own localStorage read, applied here in case the owner's device is ever
+ * running a different app version with a different flag set than this one. */
+function toFeatureFlags(raw: Record<string, boolean>): FeatureFlags {
+  return { ...DEFAULT_FEATURES, ...raw };
+}
 
 /**
  * Guest side of the live CRDT sync engine - see hostSession.ts for the owner side of the same
@@ -38,6 +47,10 @@ export interface JoinedSession {
    * content, which previously produced wrong results for notes that don't open with a distinct
    * title-like first line. */
   title: string;
+  /** The owner's FeatureFlags as of connect time (see SessionCtrlMessage's "welcome" comment
+   * for the "sent once, not live-pushed" caveat) - lets a guest's editor hide affordances for
+   * features the owner has turned off locally (e.g. code blocks). */
+  features: FeatureFlags;
   /** Live cursors/selections and presence - see HostedSession.awareness's own comment in
    * hostSession.ts; same "single source of truth for the UI" role on this side too. */
   awareness: Awareness;
@@ -146,6 +159,7 @@ export function joinSession(
               resolve({
                 yXmlFragment,
                 title: message.title,
+                features: toFeatureFlags(message.features),
                 awareness,
                 canEdit: role === "editor",
                 close: () => {

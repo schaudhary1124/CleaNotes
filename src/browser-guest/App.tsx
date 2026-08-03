@@ -149,7 +149,7 @@ export function BrowserGuestApp() {
             onSubmit={(pin, name) => void handleSubmitPin(pin, name)}
           />
         ) : status === "connected" && session ? (
-          <BrowserEditor session={session} canEdit={canEdit} />
+          <BrowserEditor session={session} canEdit={canEdit} noteId={link.payload.noteId} />
         ) : (
           <CenteredMessage
             title={status === "connecting" ? "Connecting…" : "Waiting for the owner to be online"}

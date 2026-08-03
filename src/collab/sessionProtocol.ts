@@ -33,7 +33,15 @@ export type SessionCtrlMessage =
   // `title` is the owner's real, filename-derived title - safe to send here (unlike the invite
   // payload, see invite.ts's "leaks nothing before vetting" comment) because by this point the
   // recipient is already an approved, ACL-verified collaborator, not an unvetted invite holder.
-  | { type: "welcome"; signature: string; title: string }
+  // `features` is the owner's current FeatureFlags (see utils/settings.ts), sent once, same
+  // "as of connect time, not live-pushed on a later change" limitation `title` already has;
+  // lets a guest's editor hide affordances for features the owner has turned off locally.
+  // Typed as a plain string-keyed record rather than FeatureFlags itself: Trystero's
+  // makeAction<T> requires T to structurally satisfy JsonValue's index signature, which a
+  // closed `interface` (however boolean-valued every one of its fields is) doesn't
+  // automatically do - see yjsBridge.ts's toFeatureFlags for where this gets turned back into
+  // a real, defaulted FeatureFlags.
+  | { type: "welcome"; signature: string; title: string; features: Record<string, boolean> }
   | { type: "denied"; reason?: string }
   // Pushed to an already-connected peer when their role or the note's lock state changes -
   // lets their UI reflect it immediately instead of only finding out once they try to type

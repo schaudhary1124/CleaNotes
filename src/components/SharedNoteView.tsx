@@ -78,7 +78,7 @@ export function SharedNoteView({ note, session, status, canEdit, onBack }: Share
             sketchMode={false}
             onToggleSketchMode={noop}
             sketchEnabled={false}
-            codeBlockEnabled
+            codeBlockEnabled={session.features.codeBlock}
             voiceNotesEnabled={false}
             noteChoices={[]}
             onNavigateToNoteLink={noop}

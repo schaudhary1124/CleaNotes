@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import {
   Bold,
   Brush,
-  ChevronDown,
   Code,
   Crop,
   Highlighter,
@@ -14,17 +13,10 @@ import {
   ListChecks,
   ListOrdered,
   Minus as DividerIcon,
-  Palette,
   Pilcrow,
   RemoveFormatting,
   SeparatorHorizontal,
   Strikethrough,
-  Table2,
-  TextAlignCenter,
-  TextAlignEnd,
-  TextAlignStart,
-  Trash2,
-  Type,
   Underline,
   WrapText,
 } from "lucide-react";
@@ -46,10 +38,9 @@ import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { redoCommand as yRedoCommand, undoCommand as yUndoCommand } from "y-prosemirror";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
 import { getNoteLook, readSketch, setNoteLook, writeAttachment, writeSketch } from "../utils/fsNotes";
-import type { BlockStyle, CollabPluginConfig, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
+import type { CollabPluginConfig, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
 import { getSelectionState, registerMilkdownPlugins } from "../milkdown/setup";
 import { setBlockAlign, setTableColumnAlign } from "../milkdown/alignmentCommands";
-import type { BlockAlign } from "../milkdown/alignmentSchemaExtensions";
 import { setSelectedImageWrap, toggleSelectedImageCrop } from "../milkdown/imageCommands";
 import { IMAGE_CROP_CHANGED_EVENT } from "../milkdown/imageView";
 import type { ImageWrap } from "../milkdown/imageSchemaExtensions";
@@ -91,6 +82,10 @@ import { DEFAULT_SKETCH_COLOR, SKETCH_TOOL_SIZES, SketchToolbar } from "./Sketch
 import { filterNoteChoices, NoteLinkResultsList, type NoteLinkChoice } from "./NoteLinkPicker";
 import { ToolbarPopover } from "./ToolbarPopover";
 import { LinkPopover, NotePinPopover, SelectionLinkToolbar } from "./SelectionLinkToolbar";
+import { ToolbarButtonGroup, type ToolbarAction } from "./ToolbarButtonGroup";
+import { ALIGN_OPTIONS, TableMenu } from "./TableMenu";
+import { LookDropdown } from "./LookDropdown";
+import { TextStyleDropdown } from "./TextStyleDropdown";
 import type { NoteLook, SketchStroke, SketchTool } from "../types";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved";
@@ -135,409 +130,6 @@ const AUTOSAVE_DELAY_MS = 1000;
  * unmounted and a fresh one remounted every time the active tab changes (see App.tsx's Editor
  * `key`), which would otherwise reset every note back to the top on every visit. */
 const scrollPositions = new Map<string, number>();
-
-const CELL_COLORS: { label: string; value: string }[] = [
-  { label: "Red", value: "rgba(248, 113, 113, 0.35)" },
-  { label: "Orange", value: "rgba(251, 146, 60, 0.35)" },
-  { label: "Yellow", value: "rgba(250, 204, 21, 0.35)" },
-  { label: "Green", value: "rgba(74, 222, 128, 0.3)" },
-  { label: "Blue", value: "rgba(96, 165, 250, 0.3)" },
-  { label: "Purple", value: "rgba(192, 132, 252, 0.3)" },
-  { label: "Gray", value: "rgba(148, 163, 184, 0.3)" },
-];
-
-const ALIGN_OPTIONS: { align: BlockAlign; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
-  { align: "left", label: "Align left", icon: TextAlignStart },
-  { align: "center", label: "Align center", icon: TextAlignCenter },
-  { align: "right", label: "Align right", icon: TextAlignEnd },
-];
-
-const TEXT_STYLES: { style: BlockStyle; label: string; className: string }[] = [
-  { style: "paragraph", label: "Normal text", className: "text-sm" },
-  { style: 3, label: "Subheading", className: "text-base font-semibold" },
-  { style: 2, label: "Heading", className: "text-lg font-bold" },
-  { style: 1, label: "Title", className: "text-xl font-bold" },
-];
-
-const NOTE_LOOKS: { value: NoteLook; label: string }[] = [
-  { value: "plain", label: "Plain" },
-  { value: "paper", label: "Paper" },
-  { value: "grid", label: "Grid" },
-  { value: "index-card", label: "Index card" },
-];
-
-function TextStyleDropdown({
-  blockStyle,
-  onSelect,
-}: {
-  blockStyle: BlockStyle;
-  onSelect: (style: BlockStyle) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const anchorRef = useRef<HTMLButtonElement>(null);
-  const current = TEXT_STYLES.find((s) => s.style === blockStyle) ?? TEXT_STYLES[0];
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        ref={anchorRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="Text style"
-        aria-label="Text style"
-        aria-expanded={open}
-        className="btn-ghost hover:bg-surface-hover flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs"
-      >
-        <Type size={13} />
-        <span className="max-w-20 truncate">{current.label}</span>
-        <ChevronDown size={12} />
-      </button>
-      {open && (
-        <ToolbarPopover
-          anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
-          className="glass-panel shadow-app-lg border-subtle w-40 overflow-hidden rounded-lg border py-1"
-        >
-          {TEXT_STYLES.map((s) => (
-            <button
-              key={s.label}
-              type="button"
-              onClick={() => {
-                onSelect(s.style);
-                setOpen(false);
-              }}
-              className={`hover:bg-surface-hover flex w-full items-center px-3 py-1.5 text-left ${s.className} ${
-                s.style === blockStyle ? "text-accent bg-accent-soft" : "text-primary"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </ToolbarPopover>
-      )}
-    </div>
-  );
-}
-
-function LookDropdown({ look, onSelect }: { look: NoteLook; onSelect: (look: NoteLook) => void }) {
-  const [open, setOpen] = useState(false);
-  const anchorRef = useRef<HTMLButtonElement>(null);
-  const current = NOTE_LOOKS.find((l) => l.value === look) ?? NOTE_LOOKS[0];
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        ref={anchorRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="Note look"
-        aria-label="Note look"
-        aria-expanded={open}
-        className="btn-ghost hover:bg-surface-hover flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs"
-      >
-        <Palette size={13} />
-        <span className="max-w-20 truncate">{current.label}</span>
-        <ChevronDown size={12} />
-      </button>
-      {open && (
-        <ToolbarPopover
-          anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
-          className="glass-panel shadow-app-lg border-subtle w-40 overflow-hidden rounded-lg border py-1"
-        >
-          {NOTE_LOOKS.map((l) => (
-            <button
-              key={l.value}
-              type="button"
-              onClick={() => {
-                onSelect(l.value);
-                setOpen(false);
-              }}
-              className={`hover:bg-surface-hover flex w-full items-center px-3 py-1.5 text-left text-sm ${
-                l.value === look ? "text-accent bg-accent-soft" : "text-primary"
-              }`}
-            >
-              {l.label}
-            </button>
-          ))}
-        </ToolbarPopover>
-      )}
-    </div>
-  );
-}
-
-type ToolbarAction = {
-  icon: React.ComponentType<{ size?: number }>;
-  label: string;
-  action: () => void;
-  isActive?: boolean;
-  disabled?: boolean;
-};
-
-/** Combines related actions (e.g. Bold/Italic) into a single button: clicking
- * it runs the currently-active (or last-picked) action, and hovering reveals
- * the full set so the user can switch to a different one. */
-function ToolbarButtonGroup({ items }: { items: ToolbarAction[] }) {
-  const [open, setOpen] = useState(false);
-  const [lastIndex, setLastIndex] = useState(0);
-  const anchorRef = useRef<HTMLDivElement>(null);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const activeIndex = items.findIndex((item) => item.isActive);
-  const current = items[activeIndex >= 0 ? activeIndex : lastIndex];
-  const allDisabled = items.every((item) => item.disabled);
-
-  const openNow = useCallback(() => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    setOpen(true);
-  }, []);
-  const closeSoon = useCallback(() => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = setTimeout(() => setOpen(false), 150);
-  }, []);
-  useEffect(() => {
-    return () => {
-      if (closeTimer.current) clearTimeout(closeTimer.current);
-    };
-  }, []);
-
-  return (
-    <div ref={anchorRef} className="relative flex shrink-0" onMouseEnter={allDisabled ? undefined : openNow} onMouseLeave={closeSoon}>
-      <button
-        type="button"
-        disabled={current.disabled}
-        onClick={() => {
-          setLastIndex(items.indexOf(current));
-          current.action();
-        }}
-        title={current.label}
-        aria-label={current.label}
-        aria-pressed={activeIndex >= 0}
-        className={`btn-ghost relative h-7 w-7 shrink-0 ${activeIndex >= 0 ? "bg-accent-soft text-accent" : ""} ${current.disabled ? "cursor-not-allowed opacity-40" : ""}`}
-      >
-        <current.icon size={14} />
-        <ChevronDown size={8} className="absolute bottom-0 right-0 opacity-50" />
-      </button>
-      {open && !allDisabled && (
-        <ToolbarPopover
-          anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
-          className="glass-panel shadow-app-lg border-subtle inline-flex overflow-hidden rounded-lg border p-1"
-        >
-          <div className="flex items-center gap-0.5" onMouseEnter={openNow} onMouseLeave={closeSoon}>
-            {items.map((item, idx) => (
-              <button
-                key={item.label}
-                type="button"
-                disabled={item.disabled}
-                onClick={() => {
-                  setLastIndex(idx);
-                  item.action();
-                  setOpen(false);
-                }}
-                title={item.label}
-                aria-label={item.label}
-                aria-pressed={item.isActive}
-                className={`btn-ghost h-7 w-7 shrink-0 ${item.isActive ? "bg-accent-soft text-accent" : ""} ${item.disabled ? "cursor-not-allowed opacity-40" : ""}`}
-              >
-                <item.icon size={14} />
-              </button>
-            ))}
-          </div>
-        </ToolbarPopover>
-      )}
-    </div>
-  );
-}
-
-function TableMenu({
-  inTable,
-  cellAlign,
-  onInsert,
-  onAddRow,
-  onAddColumn,
-  onDeleteRow,
-  onDeleteColumn,
-  onDeleteTable,
-  onSetCellColor,
-  onSetCellAlign,
-}: {
-  inTable: boolean;
-  cellAlign: BlockAlign;
-  onInsert: (row: number, col: number) => void;
-  onAddRow: () => void;
-  onAddColumn: () => void;
-  onDeleteRow: () => void;
-  onDeleteColumn: () => void;
-  onDeleteTable: () => void;
-  onSetCellColor: (color: string | null) => void;
-  onSetCellAlign: (align: BlockAlign) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState({ row: 3, col: 3 });
-  const anchorRef = useRef<HTMLButtonElement>(null);
-  const GRID = 6;
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        ref={anchorRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="Table"
-        aria-label="Table"
-        aria-expanded={open}
-        aria-pressed={inTable}
-        className={`btn-ghost h-7 w-7 shrink-0 ${inTable ? "bg-accent-soft text-accent" : ""}`}
-      >
-        <Table2 size={14} />
-      </button>
-      {open && !inTable && (
-        <ToolbarPopover
-          anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
-          className="glass-panel shadow-app-lg border-subtle rounded-lg border p-2.5"
-        >
-          <div
-            className="grid gap-1"
-            style={{ gridTemplateColumns: `repeat(${GRID}, 16px)` }}
-            onMouseLeave={() => setHover({ row: 3, col: 3 })}
-          >
-            {Array.from({ length: GRID * GRID }).map((_, i) => {
-              const row = Math.floor(i / GRID) + 1;
-              const col = (i % GRID) + 1;
-              const active = row <= hover.row && col <= hover.col;
-              return (
-                <button
-                  key={i}
-                  type="button"
-                  onMouseEnter={() => setHover({ row, col })}
-                  onClick={() => {
-                    onInsert(row, col);
-                    setOpen(false);
-                  }}
-                  className={`h-4 w-4 rounded-sm border ${
-                    active ? "bg-accent-solid border-accent-soft" : "border-subtle-strong"
-                  }`}
-                />
-              );
-            })}
-          </div>
-          <div className="text-tertiary mt-1.5 text-center text-xs">
-            {hover.row} × {hover.col}
-          </div>
-        </ToolbarPopover>
-      )}
-      {open && inTable && (
-        <ToolbarPopover
-          anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
-          className="glass-panel shadow-app-lg border-subtle w-44 overflow-hidden rounded-lg border py-1 text-sm"
-        >
-          <button
-            type="button"
-            className="hover:bg-surface-hover text-primary w-full px-3 py-1.5 text-left"
-            onClick={() => {
-              onAddRow();
-              setOpen(false);
-            }}
-          >
-            Insert row below
-          </button>
-          <button
-            type="button"
-            className="hover:bg-surface-hover text-primary w-full px-3 py-1.5 text-left"
-            onClick={() => {
-              onAddColumn();
-              setOpen(false);
-            }}
-          >
-            Insert column right
-          </button>
-          <button
-            type="button"
-            className="hover:bg-surface-hover text-primary w-full px-3 py-1.5 text-left"
-            onClick={() => {
-              onDeleteRow();
-              setOpen(false);
-            }}
-          >
-            Delete row
-          </button>
-          <button
-            type="button"
-            className="hover:bg-surface-hover text-primary w-full px-3 py-1.5 text-left"
-            onClick={() => {
-              onDeleteColumn();
-              setOpen(false);
-            }}
-          >
-            Delete column
-          </button>
-          <div className="border-subtle my-1 border-t" />
-          <div className="text-tertiary px-3 pb-1 pt-0.5 text-xs">Column align</div>
-          <div className="flex items-center gap-1 px-3 pb-1.5">
-            {ALIGN_OPTIONS.map(({ align, label, icon: Icon }) => (
-              <button
-                key={align}
-                type="button"
-                title={label}
-                aria-label={label}
-                aria-pressed={cellAlign === align}
-                className={`btn-ghost h-6 w-6 shrink-0 ${cellAlign === align ? "bg-accent-soft text-accent" : ""}`}
-                onClick={() => onSetCellAlign(align)}
-              >
-                <Icon size={13} />
-              </button>
-            ))}
-          </div>
-          <div className="border-subtle my-1 border-t" />
-          <div className="text-tertiary px-3 pb-1 pt-0.5 text-xs">Fill color</div>
-          <div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5">
-            {CELL_COLORS.map((color) => (
-              <button
-                key={color.label}
-                type="button"
-                title={color.label}
-                aria-label={color.label}
-                className="border-subtle-strong h-5 w-5 shrink-0 rounded-full border"
-                style={{ background: color.value }}
-                onClick={() => {
-                  onSetCellColor(color.value);
-                  setOpen(false);
-                }}
-              />
-            ))}
-            <button
-              type="button"
-              title="Clear color"
-              aria-label="Clear color"
-              className="border-subtle-strong text-tertiary hover:text-primary flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs"
-              onClick={() => {
-                onSetCellColor(null);
-                setOpen(false);
-              }}
-            >
-              ×
-            </button>
-          </div>
-          <div className="border-subtle my-1 border-t" />
-          <button
-            type="button"
-            className="hover:bg-danger-soft text-danger flex w-full items-center gap-1.5 px-3 py-1.5 text-left"
-            onClick={() => {
-              onDeleteTable();
-              setOpen(false);
-            }}
-          >
-            <Trash2 size={13} />
-            Delete table
-          </button>
-        </ToolbarPopover>
-      )}
-    </div>
-  );
-}
 
 const WRAP_OPTIONS: {
   wrap: ImageWrap;

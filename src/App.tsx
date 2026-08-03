@@ -981,7 +981,7 @@ function App() {
       for (const path of shouldHost) {
         if (hostedSharedSessionsRef.current.has(path)) continue;
         try {
-          const session = await hostSession(path, currentIdentity);
+          const session = await hostSession(path, currentIdentity, settings.features);
           hostedSharedSessionsRef.current.set(path, session);
           changed = true;
         } catch {
@@ -1031,7 +1031,12 @@ function App() {
     } finally {
       reconcilingHostedSessionsRef.current = false;
     }
-  }, []);
+    // settings is a dependency now that hostSession is passed settings.features (for the
+    // welcome message's FeatureFlags) - a settings change re-creates this callback, which the
+    // effects below already re-subscribe to, so a feature toggle reaches newly-hosted sessions
+    // promptly. Already-connected peers only pick it up on their next reconnect (same "sent
+    // once at welcome" limitation noted on SessionCtrlMessage's "welcome" variant).
+  }, [settings]);
 
   // Runs once identity is ready, then on a 30s poll (to notice new shares from other windows/
   // devices without needing an explicit bump) and immediately on every collabVersion bump.

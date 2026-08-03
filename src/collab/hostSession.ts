@@ -6,7 +6,7 @@ import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
 import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabAcl } from "../types";
+import type { CollabAcl, FeatureFlags } from "../types";
 import { readNote, titleFromNotePath } from "../utils/fsNotes";
 import { parseMarkdownToProseMirrorDoc } from "../milkdown/headlessParse";
 
@@ -85,7 +85,7 @@ export interface HostedSession {
  * open - collaborators can join/rejoin this same session at any point while it's running, with
  * no fresh invite needed (they were already vetted once, during pairing).
  */
-export async function hostSession(notePath: string, identity: DeviceIdentity): Promise<HostedSession> {
+export async function hostSession(notePath: string, identity: DeviceIdentity, features: FeatureFlags): Promise<HostedSession> {
   const acl = await getAcl(notePath);
   if (!acl) throw new Error("This note has never been shared.");
 
@@ -159,7 +159,13 @@ export async function hostSession(notePath: string, identity: DeviceIdentity): P
     });
     await update.send(Y.encodeStateAsUpdateV2(ydoc), { target: peerId });
     const welcomeSignature = toHex(sign(identity, signedText("welcome", acl.noteId, message.pubKey)));
-    await ctrl.send({ type: "welcome", signature: welcomeSignature, title: titleFromNotePath(notePath) }, { target: peerId });
+    await ctrl.send(
+      // Cast, not a lie: FeatureFlags' actual runtime shape (string keys, boolean values) is a
+      // valid Record<string, boolean> - TS just doesn't infer that automatically for a closed
+      // interface without an explicit index signature (see sessionProtocol.ts's own comment).
+      { type: "welcome", signature: welcomeSignature, title: titleFromNotePath(notePath), features: features as unknown as Record<string, boolean> },
+      { target: peerId },
+    );
     // Catch the newly-joined peer up on everyone already present, not just future changes.
     const knownClients = [...awareness.getStates().keys()];
     if (knownClients.length > 0) {
