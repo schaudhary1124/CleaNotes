@@ -54,6 +54,13 @@ export function BrowserGuestApp() {
   const [status, setStatus] = useState<"connecting" | "connected" | "offline">("connecting");
   const [canEdit, setCanEdit] = useState(true);
   const managedRef = useRef<ManagedGuestSession | null>(null);
+  // Whether this role/link has ever actually reached "connected" - reset at the top of the
+  // session effect below every time it starts a fresh attempt. Lets onStatusChange (in that same
+  // effect) tell "this is the very first connect attempt failing" apart from "a live session
+  // just dropped and is quietly retrying in the background" - only the former auto-falls-back to
+  // PinEntry (see handleReenterPin's own comment for why a remembered role's first attempt so
+  // often needs a fresh PIN redemption to actually re-grant access, not just a network retry).
+  const hasConnectedRef = useRef(false);
 
   // Browsers don't reload the page (or re-run this component's mount-time state) for a
   // fragment-only navigation - the link's noteId/ownerPubKey live entirely in that fragment, so
@@ -80,20 +87,30 @@ export function BrowserGuestApp() {
   // maintainGuestSession is what makes that automatic here rather than something to re-derive.
   useEffect(() => {
     if (!link.ok || role === null) return;
+    hasConnectedRef.current = false;
     setSession(null);
     setStatus("connecting");
     const managed = maintainGuestSession(
       { noteId: link.payload.noteId, ownerPubKey: link.payload.ownerPubKey, role, identity, displayName },
       {
-        onStatusChange: setStatus,
+        onStatusChange: (next) => {
+          if (next === "connected") {
+            hasConnectedRef.current = true;
+          } else if (next === "offline" && !hasConnectedRef.current) {
+            // The very first attempt (remembered role, no PIN re-entered) failed outright,
+            // rather than a live session dropping and retrying - in practice this almost always
+            // means the remembered grant itself needs refreshing (see handleReenterPin's own
+            // comment), not a transient network hiccup that a silent background retry would
+            // eventually recover from on its own. Skip the "waiting for owner" screen and its
+            // manual escape hatch entirely; go straight back to PinEntry.
+            handleReenterPin("Couldn't reconnect automatically - enter the PIN again.");
+            return;
+          }
+          setStatus(next);
+        },
         onSessionChange: setSession,
         onCanEditChange: setCanEdit,
-        onDenied: () => {
-          localStorage.removeItem(rememberedRoleKey(link.payload.noteId));
-          setSession(null);
-          setPinError("Your access was removed. Enter the PIN again to reconnect.");
-          setRole(null);
-        },
+        onDenied: () => handleReenterPin("Your access was removed. Enter the PIN again to reconnect."),
       },
     );
     managedRef.current = managed;
@@ -115,13 +132,15 @@ export function BrowserGuestApp() {
   // this note currently has no active collaborators at all (e.g. access lapsed, or the PIN was
   // regenerated since this device last redeemed it), nothing is hosting a session to deny
   // anything, so joinSession just times out silently forever with no way back to PinEntry on its
-  // own. Offered once status has actually gone "offline" (not on the first "connecting" attempt,
-  // which may just be a normal reconnect) so the user isn't asked to abandon a connection that
-  // might still succeed a moment later.
-  function handleReenterPin() {
+  // own. Also fired automatically (see the session effect's onStatusChange above) the moment a
+  // remembered role's very first connect attempt fails, rather than waiting for a manual click -
+  // in practice that first-attempt failure almost always means this device's grant itself needs
+  // refreshing (redeeming the PIN again is what actually re-adds it as an active collaborator on
+  // the owner's side - see acl.ts's grantCollaborator), not something a silent retry would fix.
+  function handleReenterPin(message?: string) {
     if (link.ok) localStorage.removeItem(rememberedRoleKey(link.payload.noteId));
     setSession(null);
-    setPinError(null);
+    setPinError(message ?? null);
     setRole(null);
   }
 
@@ -178,7 +197,7 @@ export function BrowserGuestApp() {
                 : "This note only syncs while its owner's CleaNotes app is open. You'll connect automatically the moment they're back online."
             }
             spinner={status === "connecting"}
-            onReenterPin={status === "offline" ? handleReenterPin : undefined}
+            onReenterPin={status === "offline" ? () => handleReenterPin() : undefined}
           />
         )}
       </div>
