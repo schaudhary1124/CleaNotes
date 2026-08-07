@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Pause, Play, Square, X } from "lucide-react";
-import { hashAssetBytes } from "../collab/assetStore";
-import { fsAssetStore } from "../utils/fsNotes";
 import { VoiceRecording, computePeaks, decodeWav, formatDuration } from "../milkdown/voiceRecording";
+import { putAsset, type BoardAssets } from "./useAssetUrl";
 
 /** Records a voice note for placement on a board.
  *
@@ -16,10 +15,13 @@ import { VoiceRecording, computePeaks, decodeWav, formatDuration } from "../milk
  * indicator should never be lit while nothing is being captured. */
 export function VoiceCapture({
   countdownSeconds,
+  assets,
   onCancel,
   onComplete,
 }: {
   countdownSeconds: number;
+  /** Where the finished WAV is stored - the owner's disk or a guest's IndexedDB. See BoardAssets. */
+  assets: BoardAssets;
   onCancel: () => void;
   onComplete: (result: { src: string; durationMs: number; peaks: number[] }) => void;
 }) {
@@ -86,12 +88,11 @@ export function VoiceCapture({
     try {
       const { wav, durationMs } = await recording.stop();
       recordingRef.current = null;
-      const hash = await hashAssetBytes(wav);
-      await fsAssetStore.put(hash, wav);
+      const key = await putAsset(assets, wav);
       // 96 buckets is roughly one bar per 3px across a default-width voice element - dense enough
       // to read as a waveform, cheap enough to store inline in the board document.
       const peaks = computePeaks(await decodeWav(wav), 96);
-      onComplete({ src: hash, durationMs, peaks });
+      onComplete({ src: key, durationMs, peaks });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save that recording");
       setPhase("recording");

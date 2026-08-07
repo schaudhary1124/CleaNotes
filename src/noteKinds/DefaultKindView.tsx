@@ -82,7 +82,12 @@ export function DefaultKindView({
       scrollToAnchorId={pendingScrollAnchor?.path === note.path ? pendingScrollAnchor.anchorId : undefined}
       onScrolledToAnchor={onScrolledToAnchor}
       collabSession={
-        activeCollabSession
+        // Narrowed rather than asserted: KindSharedTypes is a union across every collaborative
+        // kind (see collab/kindSharedTypes.ts), and a Whiteboard session carries no yXmlFragment
+        // at all. Only this component's own kinds can produce the text half, so anything else
+        // means the note's kind changed underneath a running session - in which case falling back
+        // to a non-collaborative editor is strictly better than crashing the note open.
+        activeCollabSession && activeCollabSession.shared.kind !== "whiteboard"
           ? {
               yXmlFragment: activeCollabSession.shared.yXmlFragment,
               canEdit: true,

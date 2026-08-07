@@ -237,6 +237,129 @@ export function hitTestElement(el: BoardElement, point: BoardPoint, tolerance: n
   );
 }
 
+/** The patch of world the eraser nib covers at one pointer sample - a disc, or an axis-aligned
+ * square of the same half-extent (see BoardEraserShape).
+ *
+ * One type for both nib shapes, rather than a radius passed around loose, because *every* eraser
+ * question is asked of the same region: which elements it touches (object mode), and which part of a
+ * stroke it cuts away (partial mode). `radius` is the half-extent in both cases, so a round and a
+ * square nib of the same setting cover the same span on screen. */
+export interface EraserRegion {
+  center: BoardPoint;
+  radius: number;
+  square: boolean;
+}
+
+/** The same region grown by `pad` - used to account for a stroke's own half-width, so touching the
+ * visible edge of a thick stroke erases rather than only its mathematical centerline. */
+export function growRegion(region: EraserRegion, pad: number): EraserRegion {
+  return { ...region, radius: region.radius + pad };
+}
+
+export function pointInRegion(point: BoardPoint, region: EraserRegion): boolean {
+  const dx = Math.abs(point.x - region.center.x);
+  const dy = Math.abs(point.y - region.center.y);
+  return region.square ? Math.max(dx, dy) <= region.radius : Math.hypot(dx, dy) <= region.radius;
+}
+
+/** The sub-interval of segment `a`->`b` lying inside `region`, as parameters in [0, 1], or null when
+ * the segment misses it entirely.
+ *
+ * This is what makes partial erasing exact rather than sample-limited: a straightened stroke can be
+ * two points a thousand world-px apart (see inkAssist), so testing only the stored points would let
+ * the eraser pass straight through the middle of a line without touching it. */
+export function segmentRegionInterval(
+  a: BoardPoint,
+  b: BoardPoint,
+  region: EraserRegion,
+): [number, number] | null {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const { center, radius } = region;
+
+  if (region.square) {
+    // Liang-Barsky slab clipping against the nib's box.
+    let t0 = 0;
+    let t1 = 1;
+    const axes: [number, number, number][] = [
+      [a.x, dx, center.x],
+      [a.y, dy, center.y],
+    ];
+    for (const [origin, delta, mid] of axes) {
+      const min = mid - radius;
+      const max = mid + radius;
+      if (Math.abs(delta) < 1e-9) {
+        if (origin < min || origin > max) return null;
+        continue;
+      }
+      const near = (min - origin) / delta;
+      const far = (max - origin) / delta;
+      t0 = Math.max(t0, Math.min(near, far));
+      t1 = Math.min(t1, Math.max(near, far));
+      if (t0 > t1) return null;
+    }
+    return [t0, t1];
+  }
+
+  // Disc: solve |a + t*d - center|^2 = radius^2 for t, then clip to the segment.
+  const fx = a.x - center.x;
+  const fy = a.y - center.y;
+  const qa = dx * dx + dy * dy;
+  if (qa < 1e-12) return fx * fx + fy * fy <= radius * radius ? [0, 1] : null;
+  const qb = 2 * (fx * dx + fy * dy);
+  const qc = fx * fx + fy * fy - radius * radius;
+  const discriminant = qb * qb - 4 * qa * qc;
+  if (discriminant < 0) return null;
+  const root = Math.sqrt(discriminant);
+  const t0 = Math.max(0, (-qb - root) / (2 * qa));
+  const t1 = Math.min(1, (-qb + root) / (2 * qa));
+  return t1 < t0 ? null : [t0, t1];
+}
+
+/** Whether the eraser nib overlaps an element's drawn extent - the object-mode hit test.
+ *
+ * Deliberately not `hitTestElement`: that one answers "did the user click on this", which is a
+ * point-plus-tolerance question. The eraser is an area, and for ink and vector shapes the difference
+ * is the whole point - a nib swept *near* a long diagonal must not delete it. */
+export function elementTouchesRegion(el: BoardElement, region: EraserRegion): boolean {
+  if (el.kind === "ink") {
+    const grown = growRegion(region, el.width / 2);
+    const local: EraserRegion = {
+      ...grown,
+      center: { x: grown.center.x - el.x, y: grown.center.y - el.y },
+    };
+    const pts = el.points;
+    if (pts.length === 0) return false;
+    if (pts.length === 1) return pointInRegion(pts[0], local);
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (segmentRegionInterval(pts[i], pts[i + 1], local)) return true;
+    }
+    return false;
+  }
+  if (el.kind === "shape" && isVectorShape(el.shape)) {
+    const { a, b } = vectorEndpoints(el);
+    return segmentRegionInterval(a, b, growRegion(region, el.strokeWidth / 2)) !== null;
+  }
+  return rectTouchesRegion(el, region);
+}
+
+function rectTouchesRegion(rect: BoardRect, region: EraserRegion): boolean {
+  const { center, radius } = region;
+  if (region.square) {
+    return rectsIntersect(rect, {
+      x: center.x - radius,
+      y: center.y - radius,
+      w: radius * 2,
+      h: radius * 2,
+    });
+  }
+  // Closest point on the rect to the disc's centre; inside the rect this is the centre itself, so
+  // a nib fully within a large element still counts as touching it.
+  const nearestX = Math.min(Math.max(center.x, rect.x), rect.x + rect.w);
+  const nearestY = Math.min(Math.max(center.y, rect.y), rect.y + rect.h);
+  return Math.hypot(center.x - nearestX, center.y - nearestY) <= radius;
+}
+
 /** The topmost (last-painted) element at `point`, or null. Elements are stored back-to-front, so
  * this walks backwards - the same order the user sees them stacked. */
 export function topmostAt(

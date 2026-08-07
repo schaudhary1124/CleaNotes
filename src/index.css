@@ -1810,6 +1810,10 @@ input,
   --board-grid-minor: rgba(0, 0, 0, 0.09);
   --board-grid-major: rgba(0, 0, 0, 0.18);
   --board-element-bg: rgba(255, 255, 255, 0.9);
+  /* Toolbar tooltips: deliberately the inverse of the surface they sit on, since they overlap both
+     the toolbar and the canvas and have to be legible against either. */
+  --tip-bg: rgba(28, 28, 30, 0.94);
+  --tip-text: #ffffff;
 }
 
 :root[data-theme="midnight"] {
@@ -1817,6 +1821,9 @@ input,
   --board-grid-minor: rgba(255, 255, 255, 0.08);
   --board-grid-major: rgba(255, 255, 255, 0.16);
   --board-element-bg: rgba(255, 255, 255, 0.06);
+  /* Lifted rather than inverted: a white tooltip on a near-black board reads as a flash. */
+  --tip-bg: #2c2c36;
+  --tip-text: #f2f2f7;
 }
 
 .board-root {
@@ -1824,6 +1831,96 @@ input,
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+/* Wraps the tool row so the options panel can be positioned against it. Raised above the canvas
+   because the panel hangs *over* the board rather than taking a row of its own - a second row would
+   resize the canvas (and so the viewport) on every tool change. */
+.board-toolbar-shell {
+  position: relative;
+  z-index: 30;
+  flex-shrink: 0;
+}
+
+/* The options for the armed tool, anchored under its button by BoardToolbar's ToolOptionsPanel -
+   `left` is set inline, everything else is here. */
+.board-tool-options {
+  position: absolute;
+  /* Overlaps the toolbar's bottom border by a pixel so the panel reads as hanging off the bar
+     rather than floating beneath it. */
+  top: calc(100% - 1px);
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: calc(100% - 16px);
+  padding: 5px 8px 6px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  /* Deliberately opaque, unlike the app's other floating panels: this one hangs over the canvas, and
+     board content showing through a translucent surface makes small controls unreadable. The board's
+     own background plus the panel tint composites to a solid colour that still tracks the theme -
+     and it covers the toolbar's bottom border across the panel's width, which is what turns "a
+     popover under the bar" into "the bar dipping down under this tool". */
+  background-color: var(--board-bg);
+  background-image: linear-gradient(var(--surface-strong), var(--surface-strong));
+  box-shadow: var(--shadow-lg);
+  animation: board-options-in 0.14s ease-out;
+}
+
+@keyframes board-options-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* One row of icon controls per group. No group heading: the panel is meant to stay narrow, and each
+   control's label is an instant tooltip instead (see .board-tip). */
+.board-option-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.board-option-group + .board-option-group {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+/* Instant tooltip for the board toolbar's icon-only controls (see BoardTooltip.tsx). Portaled to the
+   body and positioned inline, so it escapes both the scrolling tool row and the note pane's
+   overflow clipping. */
+.board-tip {
+  position: fixed;
+  z-index: 60;
+  padding: 3px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: var(--tip-text);
+  background: var(--tip-bg);
+  box-shadow: var(--shadow-soft);
+  /* Never let the label itself be a hover target - it sits right below the control it describes. */
+  pointer-events: none;
+}
+
+/* Fill/background preview inside an option button. */
+.board-option-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
 }
 
 .board-canvas {

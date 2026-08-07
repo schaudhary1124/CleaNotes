@@ -3,8 +3,8 @@ import { HIGHLIGHTER_ALPHA } from "./BoardInkLayer";
 import { CodeWidget } from "./widgets/CodeWidget";
 import { TableWidget } from "./widgets/TableWidget";
 import { VoiceWidget } from "./widgets/VoiceWidget";
-import { useAssetUrl } from "./useAssetUrl";
-import { isVectorShape } from "./boardTypes";
+import { useAssetUrl, type BoardAssets } from "./useAssetUrl";
+import { boardFontStack, dashArray, isVectorShape } from "./boardTypes";
 import type {
   BoardElement,
   ImageElement,
@@ -27,6 +27,7 @@ export const BoardElementView = memo(function BoardElementView({
   onPatch,
   onStartEditing,
   editing,
+  assets,
 }: {
   element: BoardElement;
   selected: boolean;
@@ -37,6 +38,9 @@ export const BoardElementView = memo(function BoardElementView({
   onStartEditing: () => void;
   /** Text elements enter a real editing state on double-click; everything else ignores this. */
   editing: boolean;
+  /** How this board reaches image/audio bytes - differs between the owner's device and a guest's;
+   * see BoardAssets. */
+  assets: BoardAssets;
 }) {
   const style: React.CSSProperties = {
     left: element.x,
@@ -55,7 +59,7 @@ export const BoardElementView = memo(function BoardElementView({
       style={style}
       data-element-id={element.id}
     >
-      {renderBody(element, interactive, editing, onPatch, onStartEditing)}
+      {renderBody(element, interactive, editing, onPatch, onStartEditing, assets)}
     </div>
   );
 });
@@ -66,6 +70,7 @@ function renderBody(
   editing: boolean,
   onPatch: (patch: Partial<BoardElement>) => void,
   onStartEditing: () => void,
+  assets: BoardAssets,
 ) {
   switch (element.kind) {
     case "ink":
@@ -83,13 +88,13 @@ function renderBody(
         />
       );
     case "image":
-      return <ImageBody element={element} />;
+      return <ImageBody element={element} assets={assets} />;
     case "code":
       return <CodeWidget element={element} editable={interactive} onChange={onPatch} />;
     case "table":
       return <TableWidget element={element} editable={interactive} onChange={onPatch} />;
     case "voice":
-      return <VoiceWidget element={element} editable={interactive} onChange={onPatch} />;
+      return <VoiceWidget element={element} editable={interactive} onChange={onPatch} assets={assets} />;
   }
 }
 
@@ -120,6 +125,9 @@ function InkBody({ element }: { element: InkElement }) {
         strokeWidth={element.width}
         strokeLinecap="round"
         strokeLinejoin="round"
+        // Undefined for a solid stroke, which is also what every stroke drawn before stroke styles
+        // existed reads back as - see dashArray.
+        strokeDasharray={dashArray(element.dash, element.width)}
         opacity={element.tool === "highlighter" ? HIGHLIGHTER_ALPHA : 1}
       />
     </svg>
@@ -166,6 +174,10 @@ function ShapeBody({
     stroke,
     strokeWidth,
     strokeLinejoin: "round" as const,
+    strokeDasharray: dashArray(element.dash, strokeWidth),
+    // A dotted pattern is a run of zero-length dashes, which only render as dots under a round cap -
+    // without this a dotted outline disappears entirely.
+    strokeLinecap: element.dash === "dotted" ? ("round" as const) : undefined,
   };
 
   return (
@@ -192,6 +204,7 @@ function ShapeBody({
             stroke={stroke}
             strokeWidth={strokeWidth}
             strokeLinecap="round"
+            strokeDasharray={dashArray(element.dash, strokeWidth)}
             markerEnd={element.shape === "arrow" ? `url(#${arrowMarkerId(element)})` : undefined}
           />
         )}
@@ -261,6 +274,9 @@ function TextBody({
         color: element.color,
         fontSize: element.fontSize,
         textAlign: element.align,
+        fontFamily: boardFontStack(element.fontFamily),
+        fontWeight: element.bold ? 600 : undefined,
+        fontStyle: element.italic ? "italic" : undefined,
       }}
       onDoubleClick={interactive ? onStartEditing : undefined}
     >
@@ -345,8 +361,8 @@ function EditableText({
   );
 }
 
-function ImageBody({ element }: { element: ImageElement }) {
-  const url = useAssetUrl(element.src);
+function ImageBody({ element, assets }: { element: ImageElement; assets: BoardAssets }) {
+  const url = useAssetUrl(element.src, assets);
   if (!url) return <div className="board-image-placeholder" />;
   return <img className="board-image" src={url} alt={element.alt ?? ""} draggable={false} />;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Pause, Play } from "lucide-react";
 import { formatDuration } from "../../milkdown/voiceRecording";
-import { useAssetUrl } from "../useAssetUrl";
+import { useAssetUrl, type BoardAssets } from "../useAssetUrl";
 import type { VoiceElement } from "../boardTypes";
 
 /** A free-floating voice note on the board: waveform, play/pause, scrubbing.
@@ -15,12 +15,14 @@ export function VoiceWidget({
   element,
   editable,
   onChange,
+  assets,
 }: {
   element: VoiceElement;
   editable: boolean;
   onChange: (patch: Partial<VoiceElement>) => void;
+  assets: BoardAssets;
 }) {
-  const url = useAssetUrl(element.src);
+  const url = useAssetUrl(element.src, assets);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [positionMs, setPositionMs] = useState(0);

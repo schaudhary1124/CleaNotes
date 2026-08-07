@@ -4,6 +4,7 @@ import type { Ctx } from "@milkdown/kit/ctx";
 import { Fragment, Slice } from "@milkdown/kit/prose/model";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import type { JoinedSession } from "../collab/yjsBridge";
+import type { TextKindShared } from "../collab/kindSharedTypes";
 import { usePresence } from "../collab/usePresence";
 import { hashAssetBytes } from "../collab/assetStore";
 import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync";
@@ -27,6 +28,11 @@ import { DEFAULT_SKETCH_COLOR, SKETCH_TOOL_SIZES, SketchToolbar } from "../compo
 
 interface BrowserEditorProps {
   session: JoinedSession;
+  /** The session's shared types, already narrowed to the text kinds this editor can render.
+   * Passed separately rather than re-narrowed off `session.shared` here because KindSharedTypes is
+   * a union across every collaborative kind (a Whiteboard's shared types have no yXmlFragment at
+   * all), and the narrowing belongs at the registry that chose this component - see kindViews.tsx. */
+  shared: TextKindShared;
   canEdit: boolean;
   noteId: string;
 }
@@ -44,7 +50,7 @@ const EMPTY_SELECTION_STATE: BrowserSelectionState = {
   cellAlign: "left",
 };
 
-function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
+function BrowserEditorBody({ session, shared, canEdit, noteId }: BrowserEditorProps) {
   const [selectionState, setSelectionState] = useState(EMPTY_SELECTION_STATE);
   const [look, setLook] = useState<NoteLook>(() => loadNoteLook(noteId));
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -115,7 +121,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
 
   // --- Sketch mode: ink layer state - mirrors Editor.tsx's, minus that file's Tier-A
   // gesture-to-text-decoration classification (out of scope here) and disk persistence (a guest
-  // has no vault entry for this note; the shared array below, via session.shared.ySketchStrokes, is the
+  // has no vault entry for this note; the shared array below, via shared.ySketchStrokes, is the
   // only copy that exists on this device - see hostSession.ts, which is what actually persists it
   // to the owner's `.sketch.json`). ---
   const [sketchMode, setSketchMode] = useState(false);
@@ -133,7 +139,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   // Editor.tsx's identical effect, see SKETCH_LOCAL_ORIGIN's own comment for why local edits
   // don't loop back through here.
   useEffect(() => {
-    const yArr = session.shared.ySketchStrokes;
+    const yArr = shared.ySketchStrokes;
     setStrokes(yArr.toArray());
     const observer = (_event: unknown, transaction: { origin: unknown }) => {
       if (transaction.origin === SKETCH_LOCAL_ORIGIN) return;
@@ -141,7 +147,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     };
     yArr.observe(observer);
     return () => yArr.unobserve(observer);
-  }, [session.shared.ySketchStrokes]);
+  }, [shared.ySketchStrokes]);
 
   function commitStrokes(next: SketchStroke[]) {
     undoStackRef.current.push(strokes);
@@ -149,7 +155,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     setCanUndo(true);
     setCanRedo(false);
     setStrokes(next);
-    applyStrokesToYArray(session.shared.ySketchStrokes, next);
+    applyStrokesToYArray(shared.ySketchStrokes, next);
   }
 
   function handleAddStroke(stroke: SketchStroke) {
@@ -170,7 +176,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     if (!prev) return;
     redoStackRef.current.push(strokes);
     setStrokes(prev);
-    applyStrokesToYArray(session.shared.ySketchStrokes, prev);
+    applyStrokesToYArray(shared.ySketchStrokes, prev);
     setCanUndo(undoStackRef.current.length > 0);
     setCanRedo(true);
   }
@@ -180,7 +186,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     if (!next) return;
     undoStackRef.current.push(strokes);
     setStrokes(next);
-    applyStrokesToYArray(session.shared.ySketchStrokes, next);
+    applyStrokesToYArray(shared.ySketchStrokes, next);
     setCanUndo(true);
     setCanRedo(redoStackRef.current.length > 0);
   }
@@ -192,7 +198,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
       const editor = MilkdownEditor.make();
       editor.config((ctx) => {
         ctx.set(rootCtx, root);
-        // Empty on purpose: session.shared.yXmlFragment is already hydrated with the note's real
+        // Empty on purpose: shared.yXmlFragment is already hydrated with the note's real
         // content by the time JoinedSession resolves (see that field's own doc comment in
         // yjsBridge.ts) - ySyncPlugin (registered below) binds to that, not to this default.
         // Mirrors SharedNoteView.tsx's identical initialContent="" for the desktop guest view,
@@ -204,10 +210,10 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
         editor,
         noteId,
         {
-          yXmlFragment: session.shared.yXmlFragment,
+          yXmlFragment: shared.yXmlFragment,
           canEdit,
           awareness: session.awareness,
-          ySketchStrokes: session.shared.ySketchStrokes,
+          ySketchStrokes: shared.ySketchStrokes,
           resolveAsset: session.resolveAsset,
         },
         setSelectionState,
@@ -451,7 +457,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
  * theme/accent picker, the formatting toolbar, and the Milkdown body bound to the live session.
  * No sidebar, no tabs, no note-switching - there is exactly one note in scope for the lifetime
  * of this page. */
-export function BrowserEditor({ session, canEdit, noteId }: BrowserEditorProps) {
+export function BrowserEditor({ session, shared, canEdit, noteId }: BrowserEditorProps) {
   const presence = usePresence(session.awareness);
   const [settings, setSettings] = useState<AppSettings>(() => {
     const loaded = loadSettings();
@@ -488,7 +494,7 @@ export function BrowserEditor({ session, canEdit, noteId }: BrowserEditorProps) 
         </div>
       </div>
       <MilkdownProvider>
-        <BrowserEditorBody session={session} canEdit={canEdit} noteId={noteId} />
+        <BrowserEditorBody session={session} shared={shared} canEdit={canEdit} noteId={noteId} />
       </MilkdownProvider>
     </div>
   );

@@ -21,6 +21,68 @@
  * meaningless on an infinite canvas. */
 export type BoardSurface = "plain" | "graph" | "isometric";
 
+/** Dash pattern for a drawn line - freehand ink, or a shape's outline. Stored as an optional field
+ * on the elements that can carry one, so an element written before stroke styles existed (i.e. with
+ * the field absent) reads back as the solid line it was drawn as. */
+export type BoardStrokeStyle = "solid" | "dashed" | "dotted";
+
+/** Dash lengths in world px for a stroke of `width`, or null for a solid line.
+ *
+ * Scaled by the stroke width rather than fixed, because a fixed pattern degenerates at both ends of
+ * the width range - a 2px dash on an 8px-wide stroke reads as solid, and a 6px gap on a 2px stroke
+ * reads as a dotted line. A "dot" is a near-zero-length dash that the round line cap rounds out,
+ * which is the only way to get a round dot out of `stroke-dasharray`. */
+export function dashPattern(style: BoardStrokeStyle | undefined, width: number): number[] | null {
+  switch (style) {
+    case "dashed":
+      return [width * 2.6, width * 2];
+    case "dotted":
+      return [width * 0.05, width * 2];
+    default:
+      return null;
+  }
+}
+
+/** `dashPattern` as an SVG `stroke-dasharray` value, or undefined for a solid line. */
+export function dashArray(style: BoardStrokeStyle | undefined, width: number): string | undefined {
+  const pattern = dashPattern(style, width);
+  return pattern ? pattern.join(" ") : undefined;
+}
+
+/** Typeface for a text element. Three named families rather than a free-form font name: a board is
+ * a plain-text file in a vault that syncs between devices, and a font that only exists on the
+ * machine that picked it would silently fall back to something else everywhere else. */
+export type BoardFontFamily = "sans" | "serif" | "mono";
+
+/** CSS `font-family` for a text element. "sans" inherits the app's own UI stack rather than naming
+ * it again, so a board's default text follows the app font. */
+export function boardFontStack(family: BoardFontFamily | undefined): string {
+  switch (family) {
+    case "serif":
+      return '"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif';
+    case "mono":
+      return 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+    default:
+      return "inherit";
+  }
+}
+
+/** `color` at `alpha` - how a shape's tinted fill and a text box's tinted background are derived
+ * from the stroke colour, so picking one colour styles the whole element.
+ *
+ * Only `#rgb`/`#rrggbb` are converted; anything else is returned unchanged, so an unexpected value
+ * degrades to an opaque colour rather than to an invalid style string that renders as nothing. */
+export function withAlpha(color: string, alpha: number): string {
+  const hex = color.trim();
+  if (!/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex)) return color;
+  const digits =
+    hex.length === 4
+      ? [hex[1] + hex[1], hex[2] + hex[2], hex[3] + hex[3]]
+      : [hex.slice(1, 3), hex.slice(3, 5), hex.slice(5, 7)];
+  const [r, g, b] = digits.map((part) => parseInt(part, 16));
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 /** World-space point. */
 export interface BoardPoint {
   x: number;
@@ -52,6 +114,8 @@ export interface InkElement extends BoardElementBase {
   color: string;
   /** Stroke width in world pixels (i.e. at zoom 1). */
   width: number;
+  /** Absent means solid - see BoardStrokeStyle. */
+  dash?: BoardStrokeStyle;
   points: BoardPoint[];
 }
 
@@ -65,6 +129,8 @@ export interface ShapeElement extends BoardElementBase {
    * JSON round-trips through one branch. */
   fill: string;
   strokeWidth: number;
+  /** Absent means solid - see BoardStrokeStyle. */
+  dash?: BoardStrokeStyle;
   /** "line" and "arrow" only: which diagonal of the box the line runs along. False (the default)
    * is top-left -> bottom-right; true is bottom-left -> top-right.
    *
@@ -100,6 +166,11 @@ export interface TextElement extends BoardElementBase {
   align: BoardTextAlign;
   /** Sticky-note style background; "none" renders as bare text on the canvas. */
   background: string;
+  /** All three are absent on text written before the text options existed, which reads back as the
+   * regular-weight sans text it was typed as. */
+  fontFamily?: BoardFontFamily;
+  bold?: boolean;
+  italic?: boolean;
 }
 
 export interface ImageElement extends BoardElementBase {

@@ -1,5 +1,7 @@
 import type { JoinedSession } from "../collab/yjsBridge";
 import { usePresence } from "../collab/usePresence";
+import { fsAssetStore } from "../utils/fsNotes";
+import { SharedBoardView } from "../whiteboard/SharedBoardView";
 import type { GuestJoinedNote } from "../types";
 import { Editor } from "./Editor";
 
@@ -67,7 +69,20 @@ export function SharedNoteView({ note, session, status, canEdit, onBack }: Share
         </div>
       </div>
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl">
-        {session ? (
+        {session && session.shared.kind === "whiteboard" ? (
+          <SharedBoardView
+            // Same generation keying as the Editor branch below, for the same reason.
+            key={`${canEdit}:${session.generation}`}
+            session={session}
+            shared={session.shared}
+            canEdit={canEdit}
+            // A desktop guest does have a filesystem, so board images/voice notes land in this
+            // device's own content-addressed store - the same one its vault notes use.
+            assetStore={fsAssetStore}
+            voiceEnabled={session.features.voiceNotes}
+            codeEnabled={session.features.codeBlock}
+          />
+        ) : session && session.shared.kind !== "whiteboard" ? (
           <Editor
             // Includes session.generation so a resync (owner restarted hosting without this
             // guest connection ever dropping - see yjsBridge.ts's JoinedSession.generation)
