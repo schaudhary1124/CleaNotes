@@ -1799,6 +1799,420 @@ input,
   border-radius: 2px;
 }
 
+/* ---------- Whiteboard kind (see src/whiteboard/) ---------- */
+/* An infinite canvas, so nothing here scrolls: the board is a fixed-size viewport box and all
+   navigation happens through the world layer's transform (see WhiteboardView). That is the reverse
+   of `.prose-note`, which is a scrolling column - which is why boards get their own root rather
+   than reusing any of the note-surface rules above. */
+
+:root {
+  --board-bg: #fbfbf9;
+  --board-grid-minor: rgba(0, 0, 0, 0.09);
+  --board-grid-major: rgba(0, 0, 0, 0.18);
+  --board-element-bg: rgba(255, 255, 255, 0.9);
+}
+
+:root[data-theme="midnight"] {
+  --board-bg: #0e0e14;
+  --board-grid-minor: rgba(255, 255, 255, 0.08);
+  --board-grid-major: rgba(255, 255, 255, 0.16);
+  --board-element-bg: rgba(255, 255, 255, 0.06);
+}
+
+.board-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.board-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--board-bg);
+  /* The canvas owns all pointer gestures itself (pan/zoom/marquee) - without this the WebView's
+     own scroll/pinch handling fires first and fights every one of them. */
+  touch-action: none;
+  /* A drag that starts on a text element would otherwise begin a native text selection that
+     follows the pointer across the whole board. */
+  user-select: none;
+}
+
+.board-background,
+.board-ink-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.board-background {
+  pointer-events: none;
+}
+
+/* The single transformed layer every element lives in. Zero-sized on purpose: it is a coordinate
+   origin, not a box - its children are all absolutely positioned in world coordinates, and giving
+   it real dimensions would only invent an arbitrary boundary for an unbounded canvas. */
+.board-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+}
+
+.board-element {
+  position: absolute;
+  /* Click-through by default: the root does its own hit-testing (geometry.ts's topmostAt) so a
+     drag stays coherent as it passes over other elements. Only the element currently being edited
+     takes the pointer back - see `.is-editing` below. */
+  pointer-events: none;
+}
+
+.board-element.is-locked {
+  opacity: 0.85;
+}
+
+.board-element-text,
+.board-element-code,
+.board-element-table,
+.board-element-voice {
+  border-radius: 10px;
+}
+
+.board-ink,
+.board-shape {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.board-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.board-image-placeholder {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+  background: var(--surface-hover);
+}
+
+/* ---- text & shape labels ---- */
+
+.board-text {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+.board-text-content,
+.board-shape-label {
+  width: 100%;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.board-shape-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  font-size: 14px;
+}
+
+/* Placeholder for an empty text box - a plain `::before` rather than a real input placeholder,
+   since the surface is a contentEditable div. `:empty` alone isn't enough: a contentEditable that
+   has been focused and cleared often retains a stray <br>. */
+.board-text-content:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+/* Only the element currently being edited takes the pointer back, and it is the one place inside
+   the world layer where text selection is wanted again. Driven by an explicit class from
+   WhiteboardView rather than by detecting a `[contenteditable]` descendant: CodeMirror's own
+   content node is *always* contenteditable regardless of whether the widget is live, so a
+   structural selector would leave every code block on the board swallowing the clicks that are
+   supposed to reach the canvas's hit-testing. */
+.board-element.is-editing {
+  pointer-events: auto;
+  user-select: text;
+}
+
+/* ---- selection chrome ---- */
+
+.board-selection {
+  position: absolute;
+  border-style: solid;
+  border-color: rgb(var(--accent-rgb));
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.board-handle {
+  position: absolute;
+  background: var(--surface-strong);
+  border-style: solid;
+  border-color: rgb(var(--accent-rgb));
+  /* The one thing inside `.board-selection` that must take the pointer, so a resize can start. */
+  pointer-events: auto;
+}
+
+.board-draft {
+  position: absolute;
+  border-style: dashed;
+  border-color: rgb(var(--accent-rgb));
+  background: rgb(var(--accent-rgb) / 0.06);
+  pointer-events: none;
+}
+
+/* Screen-space, not world-space: the marquee is chrome the user is drawing right now, so it lives
+   outside the transformed layer and its border stays 1px at every zoom level. */
+.board-marquee {
+  position: absolute;
+  border: 1px solid rgb(var(--accent-rgb));
+  background: rgb(var(--accent-rgb) / 0.1);
+  pointer-events: none;
+}
+
+.board-status {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.board-status.is-error {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+/* ---- embedded widgets ---- */
+
+.board-code-widget,
+.board-table-widget,
+.board-voice-widget {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--board-element-bg);
+  box-shadow: var(--shadow-soft);
+}
+
+.board-code-widget,
+.board-table-widget {
+  flex-direction: column;
+}
+
+.board-widget-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  /* While the element isn't being edited the whole widget is click-through (see `.board-element`),
+     so a drag anywhere - including this bar - falls through to the board's hit-testing and moves
+     the element. Once editing, `.is-editing` makes the bar's buttons live like the rest. */
+}
+
+.board-widget-chip,
+.board-widget-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  transition: background-color 0.15s ease;
+}
+
+.board-widget-chip {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+
+.board-widget-icon {
+  height: 18px;
+  width: 18px;
+}
+
+.board-widget-chip:hover,
+.board-widget-icon:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.board-widget-chip.is-on {
+  background: rgb(var(--accent-rgb) / 0.14);
+  color: rgb(var(--accent-rgb));
+}
+
+.board-widget-chip:disabled,
+.board-widget-icon:disabled {
+  opacity: 0.4;
+}
+
+.board-widget-menu {
+  position: absolute;
+  top: 26px;
+  left: 6px;
+  z-index: 5;
+  max-height: 200px;
+  width: 150px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.board-widget-menu-item {
+  display: block;
+  width: 100%;
+  padding: 3px 6px;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.board-widget-menu-item:hover {
+  background: var(--surface-hover);
+}
+
+.board-code-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.board-code-host .cm-editor {
+  height: 100%;
+}
+
+.board-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.board-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.board-table td {
+  border: 1px solid var(--table-border);
+  padding: 0;
+}
+
+.board-table input {
+  width: 100%;
+  padding: 3px 6px;
+  background: transparent;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.board-table tr.is-header input {
+  font-weight: 600;
+}
+
+.board-table tr.is-header td {
+  background: var(--surface-hover);
+}
+
+/* ---- voice note ---- */
+
+.board-voice-widget {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.board-voice-play {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  width: 28px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(var(--accent-rgb) / 0.85);
+}
+
+.board-voice-play:disabled {
+  opacity: 0.4;
+}
+
+.board-voice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.board-voice-title {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.board-voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.board-voice-wave span {
+  flex: 1;
+  min-width: 1px;
+  border-radius: 1px;
+  background: var(--text-tertiary);
+}
+
+.board-voice-wave span.is-played {
+  background: rgb(var(--accent-rgb));
+}
+
+.board-voice-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
 /* ---------- Print / export (Fixed-Size notes - see Editor.tsx's/BrowserEditor.tsx's
    handlePrint) ---------- */
 /* The actual page dimensions/margins (from the note's PageSetup) are injected as a separate,

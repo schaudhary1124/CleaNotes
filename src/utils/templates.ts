@@ -1,4 +1,4 @@
-import { BookOpen, CalendarCheck, FileStack, FileText, Target, Users } from "lucide-react";
+import { BookOpen, CalendarCheck, FileStack, FileText, Frame, Target, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { NoteKind, NoteLook } from "../types";
 import { STARTER_CONTENT } from "./fsNotes";
@@ -74,6 +74,18 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     description: "Paginated, print-ready page layout",
     icon: FileStack,
     kind: "fixed-size",
+    look: "plain",
+    buildContent: () => STARTER_CONTENT,
+  },
+  {
+    id: "whiteboard",
+    label: "Whiteboard",
+    description: "Infinite canvas for ink, shapes, and widgets",
+    icon: Frame,
+    kind: "whiteboard",
+    // `look` is a Milkdown-only concern (see the field's own comment) - a board's equivalent is
+    // its BoardSurface, which lives in the board document rather than in notes meta because it
+    // drives snapping geometry, not just a skin.
     look: "plain",
     buildContent: () => STARTER_CONTENT,
   },

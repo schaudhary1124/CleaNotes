@@ -12,6 +12,8 @@ import {
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import { extractStudyItemsAndStrip } from "./markdownParser";
+import { normalizeBoard } from "../whiteboard/boardTypes";
+import type { BoardDoc } from "../whiteboard/boardTypes";
 import type { AssetStore } from "../collab/assetStore";
 import type {
   CollabAcl,
@@ -52,6 +54,11 @@ const STUDY_EXTENSION = ".study.json";
 // types.ts and src/collab/acl.ts), same no-leading-dot reasoning as SKETCH_EXTENSION. Only
 // created once a note is first shared - most notes never have one.
 const COLLAB_EXTENSION = ".collab.json";
+// Sidecar file next to the note holding a Whiteboard note's canvas document (see
+// src/whiteboard/boardTypes.ts), same no-leading-dot reasoning as SKETCH_EXTENSION. For this one
+// kind the sidecar - not the ".md" - is the real document; the ".md" holds only a text digest so
+// the note still participates in search/backlinks like every other note.
+const WHITEBOARD_EXTENSION = ".whiteboard.json";
 // No leading dot: Tauri's fs scope glob matching (`CleaNotes/**`) doesn't match dotfiles,
 // which would silently block reads/writes of this file.
 const META_FILE = "cleanotes-meta.json";
@@ -341,6 +348,11 @@ function collabPathFor(notePath: string): string {
   return sidecarPathFor(notePath, COLLAB_EXTENSION);
 }
 
+/** Sidecar board path for a note, e.g. "Work/Plan.md" -> "Work/Plan.whiteboard.json" */
+function whiteboardPathFor(notePath: string): string {
+  return sidecarPathFor(notePath, WHITEBOARD_EXTENSION);
+}
+
 /**
  * One-time migration from the app's pre-rename layout: if a legacy PlaiNotes folder exists
  * and CleaNotes doesn't yet, renames the whole folder in place (a single directory rename -
@@ -510,6 +522,7 @@ export async function deleteNote(path: string): Promise<void> {
     await relocateSketch(path, trashPath);
     await relocateStudyItems(path, trashPath);
     await relocateCollab(path, trashPath);
+    await relocateBoard(path, trashPath);
 
     const meta = await readMeta();
     const next = remapMetaPaths(meta, path, trashPath);
@@ -605,6 +618,7 @@ export async function restoreFromTrash(trashPath: string): Promise<RestoreResult
       await relocateSketch(trashPath, finalPath);
       await relocateStudyItems(trashPath, finalPath);
       await relocateCollab(trashPath, finalPath);
+      await relocateBoard(trashPath, finalPath);
     }
 
     return { path: finalPath, restoredToRoot };
@@ -621,6 +635,7 @@ export async function deleteForever(trashPath: string, type: "note" | "folder"):
       await deleteSketch(trashPath);
       await deleteStudyItems(trashPath);
       await deleteCollabAcl(trashPath);
+      await deleteBoard(trashPath);
     }
     const meta = await readMeta();
     // dropMetaPaths cleans up the color/createdAt/noteLook/starred entries that were
@@ -652,6 +667,7 @@ export async function purgeExpiredTrash(maxAgeMs: number = TRASH_MAX_AGE_MS): Pr
           await deleteSketch(trashPath);
           await deleteStudyItems(trashPath);
           await deleteCollabAcl(trashPath);
+          await deleteBoard(trashPath);
         }
       } catch {
         // Already gone from disk somehow - still drop its meta entry below.
@@ -786,6 +802,7 @@ export async function renameEntry(
       await relocateSketch(path, newPath);
       await relocateStudyItems(path, newPath);
       await relocateCollab(path, newPath);
+      await relocateBoard(path, newPath);
     }
 
     return newPath;
@@ -822,6 +839,7 @@ export async function moveEntry(path: string, targetParentPath: string): Promise
       await relocateSketch(path, newPath);
       await relocateStudyItems(path, newPath);
       await relocateCollab(path, newPath);
+      await relocateBoard(path, newPath);
     }
 
     return newPath;
@@ -846,6 +864,38 @@ async function relocateSidecar(oldNotePath: string, newNotePath: string, extensi
 /** Moves a note's ink sidecar (if any) alongside a rename/move of the note itself. */
 function relocateSketch(oldNotePath: string, newNotePath: string): Promise<void> {
   return relocateSidecar(oldNotePath, newNotePath, SKETCH_EXTENSION);
+}
+
+/** Moves a Whiteboard note's board sidecar (if any) alongside a rename/move of the note itself. */
+function relocateBoard(oldNotePath: string, newNotePath: string): Promise<void> {
+  return relocateSidecar(oldNotePath, newNotePath, WHITEBOARD_EXTENSION);
+}
+
+/** Reads a Whiteboard note's canvas document, or null if it has none yet (every board starts
+ * this way - the sidecar is only written once something is actually placed on the canvas). */
+export async function readBoard(notePath: string): Promise<BoardDoc | null> {
+  try {
+    const raw = await readTextFile(fullPath(whiteboardPathFor(notePath)), { baseDir: BASE_DIR });
+    return normalizeBoard(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** Persists a Whiteboard note's canvas document to its sidecar file. */
+export async function writeBoard(notePath: string, doc: BoardDoc): Promise<void> {
+  const relPath = whiteboardPathFor(notePath);
+  await mkdir(fullPath(parentOf(relPath)), { baseDir: BASE_DIR, recursive: true });
+  await writeTextFile(fullPath(relPath), JSON.stringify(doc), { baseDir: BASE_DIR });
+}
+
+/** Removes a note's board sidecar, if any. */
+export async function deleteBoard(notePath: string): Promise<void> {
+  try {
+    await remove(fullPath(whiteboardPathFor(notePath)), { baseDir: BASE_DIR });
+  } catch {
+    // No board existed for this note - nothing to clean up.
+  }
 }
 
 /** Reads a note's ink strokes, or null if it has none. */
