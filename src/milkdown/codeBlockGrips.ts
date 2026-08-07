@@ -428,6 +428,11 @@ const BTN_GAP = 4;
 
 const EXPANDED_CLASS = "cb-expanded";
 
+/** Put on the `.prose-note` scroll container of a Fixed-Size (paginated) note while one of its
+ * code blocks is expanded, to drop that note's zoom `transform` for the duration - see
+ * setExpanded's own comment, and the matching rule in index.css. */
+const PAGINATED_EXPANDED_CLASS = "cb-has-expanded";
+
 /** Remembers which code block (by its doc position - stable as long as the note's content
  * hasn't changed, which holds across a plain tab switch) was expanded per note, keyed by
  * notePath - so switching tabs away and back restores it. Module-level (not per-view state)
@@ -576,6 +581,10 @@ class CodeBlockGripsView implements PluginView {
       btns.search.remove();
     });
     this.buttons.clear();
+    // The `.prose-note` container is React-owned and can outlive this plugin view (the Milkdown
+    // editor is recreated under it), so the class setExpanded put there has to come back off -
+    // unlike `.cb-expanded`, which lives on the code block's own, editor-owned DOM.
+    this.view.dom.closest(".prose-note")?.classList.remove(PAGINATED_EXPANDED_CLASS);
     this.searchPopups.forEach((popup) => popup.destroy());
     this.searchPopups.clear();
     window.removeEventListener("resize", this.onWindowResize);
@@ -766,6 +775,20 @@ class CodeBlockGripsView implements PluginView {
 
     const btns = this.buttons.get(block);
     block.classList.toggle(EXPANDED_CLASS, expand);
+    // Fixed-Size notes render their content inside a `transform: scale(zoom)` wrapper
+    // (Editor.tsx's/BrowserEditor.tsx's sketchWrapperRef, `.note-content-surface`), and a
+    // transformed ancestor doesn't just become the containing block for `position: fixed`
+    // descendants (which toFixedRect already compensates for) - it also puts them back under the
+    // overflow clipping of everything between it and the viewport. That left an expanded block in
+    // a Fixed-Size note clipped to the scrolling note area instead of covering the whole editor
+    // pane, *and* scrolling away with the note's content the moment the user scrolled, neither of
+    // which happens in a Default note where no such transform exists. Dropping the transform
+    // (see index.css) for as long as a block is expanded makes both notes take the identical
+    // "fixed against the same non-scrolling ancestor" path. Nothing visible is lost: the expanded
+    // block covers the whole pane anyway, pagination measures via `offsetTop`/`offsetHeight` and
+    // so is transform-independent by construction (see paginationLayout.ts's top comment), and
+    // `.zoom-stage` keeps its own zoomed width/height, so the scroll extent doesn't jump either.
+    block.closest(".prose-note")?.classList.toggle(PAGINATED_EXPANDED_CLASS, expand);
     if (btns) {
       btns.expand.innerHTML = expand ? MINIMIZE_ICON : MAXIMIZE_ICON;
       btns.expand.title = expand ? "Collapse" : "Expand to fill the note";

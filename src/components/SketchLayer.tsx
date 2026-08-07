@@ -12,6 +12,16 @@ interface SketchLayerProps {
   width: number;
   onAddStroke: (stroke: SketchStroke) => void;
   onEraseStrokes: (ids: string[]) => void;
+  /** Fixed-Size notes only: the `transform: scale(zoom)` Editor.tsx applies to this layer's own
+   * parent (sketchWrapperRef). Defaults to 1 for non-paginated notes, which render no such
+   * transform at all. Every measurement this component takes off `.prose-note` (its scrolling
+   * ancestor, which sits *outside* that transform and so stays in real, unscaled screen pixels -
+   * clientWidth/clientHeight, scrollTop, padding) has to be divided by `zoom` before use as a
+   * style/ctx value inside this transformed subtree, since the ancestor transform re-multiplies
+   * it back to the correct on-screen size/position. Skipping that left the canvas sized and ink
+   * positioned for a 1:1 (unzoomed) world while actually being displayed zoom%-scaled, so drawn
+   * strokes landed away from the cursor and the canvas itself over/under-shot the viewport. */
+  zoom?: number;
 }
 
 const HIGHLIGHTER_ALPHA = 0.35;
@@ -113,6 +123,7 @@ export function SketchLayer({
   width,
   onAddStroke,
   onEraseStrokes,
+  zoom = 1,
 }: SketchLayerProps) {
   // clipRef is the outermost element (gets `className`/`inset-0` from the caller, matching
   // sketchWrapperRef's own bounds exactly) and exists solely to `overflow: hidden` - containerRef
@@ -151,6 +162,13 @@ export function SketchLayer({
   // padTopRef also correcting *where* the container itself sits - see applyScrollOffset).
   const padLeftRef = useRef(0);
   const padTopRef = useRef(0);
+  // Mirrors the `zoom` prop in a ref so the useCallback-memoized functions below (redrawBase,
+  // redrawLive, applyScrollOffset, resizeAndRedraw - all kept referentially stable via empty dep
+  // arrays, same reasoning as the other refs above) can read the current value without needing
+  // `zoom` in their dep arrays, which would otherwise tear down/reattach the scroll & resize
+  // listeners in the effect below on every zoom change.
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
 
   function clearCanvas(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) {
     ctx.save();
@@ -168,8 +186,14 @@ export function SketchLayer({
     clearCanvas(canvas, ctx);
     ctx.save();
     // Shifts document-relative stroke coordinates into this (viewport-sized) canvas's own local
-    // space - the inverse of toLocalPoint's offsets below.
-    ctx.translate(padLeftRef.current, padTopRef.current - scrollTopRef.current);
+    // space - the inverse of toLocalPoint's offsets below. padLeftRef/padTopRef/scrollTopRef are
+    // all measured off `.prose-note`, which sits outside the Fixed-Size zoom transform and so
+    // stays in real screen pixels - dividing by zoom here converts that into this canvas's own
+    // local (pre-scale) pixel space, which is what the ancestor transform then re-scales.
+    ctx.translate(
+      padLeftRef.current / zoomRef.current,
+      (padTopRef.current - scrollTopRef.current) / zoomRef.current,
+    );
     for (const stroke of strokesRef.current) {
       if (erasedIdsRef.current.has(stroke.id)) continue;
       drawStroke(ctx, stroke);
@@ -186,7 +210,10 @@ export function SketchLayer({
     clearCanvas(canvas, ctx);
     if (currentStrokeRef.current) {
       ctx.save();
-      ctx.translate(padLeftRef.current, padTopRef.current - scrollTopRef.current);
+      ctx.translate(
+        padLeftRef.current / zoomRef.current,
+        (padTopRef.current - scrollTopRef.current) / zoomRef.current,
+      );
       drawStroke(ctx, currentStrokeRef.current);
       ctx.restore();
     }
@@ -202,12 +229,25 @@ export function SketchLayer({
    * drawing/hit-testing (see redrawBase/toLocalPoint), just not for this element's own position. */
   const applyScrollOffset = useCallback(() => {
     const el = containerRef.current;
-    if (el) el.style.top = `${scrollTopRef.current}px`;
+    // containerRef's `top` is a local (pre-scale) CSS position - see resizeAndRedraw's comment
+    // for why every raw `.prose-note` measurement needs `/ zoom` before landing on a style inside
+    // this transformed subtree.
+    if (el) el.style.top = `${scrollTopRef.current / zoomRef.current}px`;
   }, []);
 
   const resizeAndRedraw = useCallback(
-    (width: number, height: number) => {
-      if (width === 0 || height === 0) return;
+    (viewportWidth: number, viewportHeight: number) => {
+      if (viewportWidth === 0 || viewportHeight === 0) return;
+      // viewportWidth/viewportHeight come from `.prose-note`'s clientWidth/clientHeight - real,
+      // unscaled screen pixels, since `.prose-note` sits outside the Fixed-Size `transform:
+      // scale(zoom)` ancestor. This canvas, though, lives *inside* that transform, so its own CSS
+      // box has to be sized in local (pre-scale) pixels: dividing by `zoom` here means the
+      // ancestor's scale multiplies it back to exactly cover `.prose-note`'s real viewport. `zoom`
+      // is always 1 for non-paginated notes (no such transform is rendered at all), so this is a
+      // no-op there.
+      const z = zoomRef.current;
+      const width = viewportWidth / z;
+      const height = viewportHeight / z;
       const dpr = window.devicePixelRatio || 1;
       const container = containerRef.current;
       if (container) {
@@ -252,10 +292,17 @@ export function SketchLayer({
       const padRight = parseFloat(style.paddingRight) || 0;
       const padTop = parseFloat(style.paddingTop) || 0;
       const padBottom = parseFloat(style.paddingBottom) || 0;
-      clip.style.left = `${-padLeft}px`;
-      clip.style.right = `${-padRight}px`;
-      clip.style.top = `${-padTop}px`;
-      clip.style.bottom = `${-padBottom}px`;
+      // clip is inside the Fixed-Size zoom transform (it's this component's own root, a
+      // descendant of sketchWrapperRef); the padding values above are real, unscaled `.prose-note`
+      // pixels, so they need `/ zoom` before landing on clip's own (local, pre-scale) offsets -
+      // same reasoning as resizeAndRedraw. padLeftRef/padTopRef below stay in raw, unscaled units
+      // though: toLocalPoint combines them with other raw screen-space quantities first and only
+      // divides the total by zoom once, at the end.
+      const z = zoomRef.current;
+      clip.style.left = `${-padLeft / z}px`;
+      clip.style.right = `${-padRight / z}px`;
+      clip.style.top = `${-padTop / z}px`;
+      clip.style.bottom = `${-padBottom / z}px`;
       return { padLeft, padTop };
     };
 
@@ -286,7 +333,10 @@ export function SketchLayer({
       observer.disconnect();
       scrollEl.removeEventListener("scroll", onScroll);
     };
-  }, [resizeAndRedraw, redrawBase, redrawLive, applyScrollOffset]);
+    // `zoom` is a dep so a Fixed-Size zoom change re-measures/resizes/redraws immediately - a zoom
+    // change alone doesn't touch `.prose-note`'s own clientWidth/clientHeight (only its scaled
+    // descendant's reserved footprint changes), so the ResizeObserver above won't fire for it.
+  }, [resizeAndRedraw, redrawBase, redrawLive, applyScrollOffset, zoom]);
 
   useEffect(() => {
     redrawBase();
@@ -298,10 +348,16 @@ export function SketchLayer({
     // edge - see the component doc comment), but stroke storage stays relative to the text
     // column's own top-left corner and is unaffected by scroll, so these offsets get applied back
     // in here - the inverse of redrawBase/redrawLive's
-    // `ctx.translate(padLeftRef.current, padTopRef.current - scrollTopRef.current)`.
+    // `ctx.translate(padLeftRef.current, padTopRef.current - scrollTopRef.current)`. rect, clientX
+    // and clientY are all real on-screen pixels (getBoundingClientRect already accounts for the
+    // Fixed-Size `transform: scale(zoom)` ancestor), same as padLeftRef/padTopRef/scrollTopRef
+    // (measured off `.prose-note`, outside that transform) - so the whole bracket is combined in
+    // that shared screen-pixel space first, then divided by `zoom` once to land back in the
+    // native (pre-scale) pixel space stroke storage uses. `zoom` is always 1 for non-paginated
+    // notes, so this is a no-op there.
     return {
-      x: e.clientX - rect.left - padLeftRef.current,
-      y: e.clientY - rect.top + scrollTopRef.current - padTopRef.current,
+      x: (e.clientX - rect.left - padLeftRef.current) / zoom,
+      y: (e.clientY - rect.top + scrollTopRef.current - padTopRef.current) / zoom,
     };
   }
 

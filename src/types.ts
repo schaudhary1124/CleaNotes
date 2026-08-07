@@ -1,3 +1,8 @@
+/** Which view/editor a note opens with - see src/noteKinds/kinds.ts for the kind -> UI-capability
+ * mapping and src/noteKinds/registry.tsx for the kind -> component mapping. Fixed at note
+ * creation; there is no "convert an existing note's kind" affordance. */
+export type NoteKind = "default" | "fixed-size" | "code" | "whiteboard" | "spreadsheet" | "calendar";
+
 export interface NoteSummary {
   /** Path relative to the notes root, including the .md extension, e.g. "Work/Todo.md" */
   path: string;
@@ -13,6 +18,8 @@ export interface NoteSummary {
   starred?: boolean;
   /** Whether this note has any flashcards/MCQs - see NoteEntry's field of the same name. */
   hasStudyItems?: boolean;
+  /** Which view/editor this note opens with - see fsNotes.ts's `noteKinds` meta entry. */
+  kind: NoteKind;
 }
 
 export interface FolderEntry {
@@ -44,6 +51,8 @@ export interface NoteEntry {
   /** Whether this note has any flashcards/MCQs - cheaply derived during buildTree
    * from the directory listing, not a count (see fsNotes.ts). */
   hasStudyItems?: boolean;
+  /** Which view/editor this note opens with - see fsNotes.ts's `noteKinds` meta entry. */
+  kind: NoteKind;
 }
 
 export type TreeEntry = FolderEntry | NoteEntry;
@@ -84,6 +93,23 @@ export type BackgroundStyle = "flat" | "soft" | "glass";
  * `noteLooks` meta entry for persistence. */
 export type NoteLook = "plain" | "paper" | "grid" | "index-card";
 
+export type PageSizeId = "a4" | "letter" | "custom";
+
+/** A Fixed-Size note's page dimensions/margins - see fsNotes.ts's `pageSetup` meta entry
+ * (desktop) / browser-guest/pageSetup.ts (guest, localStorage-only - see that file's own
+ * comment for why this never rides the collab session). Purely a viewing/print preference, not
+ * document content - unlike NoteKind, this is meaningful only while the note is open. */
+export interface PageSetup {
+  size: PageSizeId;
+  orientation: "portrait" | "landscape";
+  /** Millimeters; only meaningful when size === "custom". */
+  customWidthMm?: number;
+  customHeightMm?: number;
+  /** No longer user-editable (see pageSizes.ts's FIXED_MARGIN_MM, which every layout/print call
+   * site uses instead of this field) - kept only so older persisted PageSetup JSON still parses. */
+  marginMm: number;
+}
+
 /** Per-feature on/off switches - see SettingsPanel.tsx's "Features" section. Disabling a
  * feature hides the ways to create/reach it elsewhere in the app; it never touches content a
  * note already has (e.g. disabling codeBlock still lets existing code blocks render/edit). */
@@ -107,6 +133,10 @@ export interface AppSettings {
    * persisted from Settings). */
   alwaysOnTop: boolean;
   features: FeatureFlags;
+  /** Seconds of "get ready" lead-in shown before a voice-note recording actually starts capturing
+   * (see VoiceRecorderPopover.tsx). 0 starts immediately. Clamped to VOICE_COUNTDOWN_MAX by the
+   * Settings stepper that edits it. */
+  voiceNoteCountdown: number;
 }
 
 export type SketchTool = "pen" | "highlighter" | "eraser";

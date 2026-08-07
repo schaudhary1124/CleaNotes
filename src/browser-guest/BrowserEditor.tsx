@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Editor as MilkdownEditor, defaultValueCtx, editorViewCtx, rootCtx } from "@milkdown/kit/core";
+import { Editor as MilkdownEditor, defaultValueCtx, editorViewCtx, rootCtx, schemaCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
+import { Fragment, Slice } from "@milkdown/kit/prose/model";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import type { JoinedSession } from "../collab/yjsBridge";
 import { usePresence } from "../collab/usePresence";
@@ -9,15 +10,19 @@ import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync"
 import { imageSchemaExt } from "../milkdown/imageSchemaExtensions";
 import { NOTE_LOOK_CHANGED_EVENT } from "../milkdown/imageView";
 import { applySettingsToDocument, loadSettings, saveSettings } from "../utils/settings";
-import type { AppSettings, NoteLook, SketchStroke, SketchTool } from "../types";
+import { clampedMarginMm, mmToPx, pageDimensionsMm, verticalMarginPx } from "../utils/pageSizes";
+import type { PaginationMetrics } from "../milkdown/paginationLayout";
+import type { AppSettings, NoteLook, PageSetup, SketchStroke, SketchTool } from "../types";
 import { registerMinimalMilkdownPlugins } from "./minimalMilkdownSetup";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserSettingsPopover } from "./BrowserSettingsPopover";
 import { loadNoteLook, saveNoteLook } from "./noteLook";
+import { loadPageSetup, savePageSetup } from "./pageSetup";
 import { fileToUploadableImage } from "./browserImageUpload";
 import { idbAssetStore } from "./idbAssetStore";
 import type { BrowserSelectionState } from "./browserSelectionState";
 import { SketchLayer } from "../components/SketchLayer";
+import { PageBackdrop, type PageRect } from "../components/PageBackdrop";
 import { DEFAULT_SKETCH_COLOR, SKETCH_TOOL_SIZES, SketchToolbar } from "../components/SketchToolbar";
 
 interface BrowserEditorProps {
@@ -45,9 +50,72 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // --- Fixed-Size page setup: same guest-local-only reasoning as `look` above (see
+  // pageSetup.ts's own comment) - a per-viewer print/display preference, not synced content. ---
+  const paginated = session.kind === "fixed-size";
+  const [pageSetup, setPageSetupState] = useState<PageSetup>(() => loadPageSetup(noteId));
+  const sketchWrapperRef = useRef<HTMLDivElement>(null);
+  // Fixed-Size notes only: see Editor.tsx's identical ref for the full reasoning.
+  const zoomStageRef = useRef<HTMLDivElement>(null);
+
+  function handleChangePageSetup(next: PageSetup) {
+    setPageSetupState(next);
+    savePageSetup(noteId, next);
+  }
+
+  const pageWidthPx = mmToPx(pageDimensionsMm(pageSetup).widthMm);
+  const pageHeightPx = mmToPx(pageDimensionsMm(pageSetup).heightMm);
+  const pageMarginPx = mmToPx(clampedMarginMm(pageSetup));
+  // Top/bottom only - left/right stay on pageMarginPx. See utils/pageSizes.ts's own comment.
+  const pageVerticalMarginPx = verticalMarginPx(pageSetup, look);
+
+  // See Editor.tsx's identical zoom state for the full reasoning (`transform: scale`, not CSS
+  // `zoom` - the latter reruns text shaping at each zoom level, and isn't reliably reflow-
+  // invariant across zoom for a given engine).
+  const [zoom, setZoom] = useState(1);
+  const handleZoomOut = () => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10));
+  const handleZoomIn = () => setZoom((z) => Math.min(2, Math.round((z + 0.1) * 10) / 10));
+
+  // Real computed page rectangles from milkdown/paginationLayout.ts's live measurement engine -
+  // see Editor.tsx's identical state for the full reasoning (starts as a single page-1-sized
+  // rectangle so even an empty/short note immediately looks like "one page on a canvas").
+  // See Editor.tsx's identical pageRects state for why these are unscaled/logical px (no
+  // `* zoom`) - the ancestor's `transform: scale` scales them visually exactly once.
+  const [pageRects, setPageRects] = useState<PageRect[]>([{ top: 0, height: pageHeightPx }]);
+  // See Editor.tsx's identical pageContentHeightPx for the full reasoning.
+  const pageContentHeightPx = pageRects.length ? pageRects[pageRects.length - 1].top + pageRects[pageRects.length - 1].height : pageHeightPx;
+  useEffect(() => {
+    setPageRects((prev) => (prev.length <= 1 ? [{ top: 0, height: pageHeightPx }] : prev));
+  }, [pageHeightPx]);
+
+  // Placeholder until the pageSetup-tracking effect below populates real values - see
+  // Editor.tsx's identical ref for the full "ref bridge" reasoning.
+  const paginationMetricsRef = useRef<PaginationMetrics>({ usablePageHeightPx: 0, marginTopPx: 0, marginBottomPx: 0, layoutKey: "" });
+
+  // Same disposable-<style>-tag technique as Editor.tsx's handlePrint - see its own comment for
+  // why a static `@page { size: var(...) }` rule isn't reliable across browsers, and for why
+  // cleanup no longer touches zoom/page-break-position styles at all (index.css's `@media print`
+  // handles those declaratively now - a "focus" fallback alongside "afterprint" here is only for
+  // the disposable `@page` style tag, a cosmetic head-tag hygiene concern, not anything visible).
+  function handlePrint() {
+    const { widthMm, heightMm } = pageDimensionsMm(pageSetup);
+    const styleEl = document.createElement("style");
+    styleEl.textContent = `@page { size: ${widthMm}mm ${heightMm}mm; margin: ${clampedMarginMm(pageSetup)}mm; }`;
+    document.head.appendChild(styleEl);
+
+    const cleanup = () => {
+      styleEl.remove();
+      window.removeEventListener("afterprint", cleanup);
+      window.removeEventListener("focus", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    window.addEventListener("focus", cleanup);
+    window.print();
+  }
+
   // --- Sketch mode: ink layer state - mirrors Editor.tsx's, minus that file's Tier-A
   // gesture-to-text-decoration classification (out of scope here) and disk persistence (a guest
-  // has no vault entry for this note; the shared array below, via session.ySketchStrokes, is the
+  // has no vault entry for this note; the shared array below, via session.shared.ySketchStrokes, is the
   // only copy that exists on this device - see hostSession.ts, which is what actually persists it
   // to the owner's `.sketch.json`). ---
   const [sketchMode, setSketchMode] = useState(false);
@@ -65,7 +133,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   // Editor.tsx's identical effect, see SKETCH_LOCAL_ORIGIN's own comment for why local edits
   // don't loop back through here.
   useEffect(() => {
-    const yArr = session.ySketchStrokes;
+    const yArr = session.shared.ySketchStrokes;
     setStrokes(yArr.toArray());
     const observer = (_event: unknown, transaction: { origin: unknown }) => {
       if (transaction.origin === SKETCH_LOCAL_ORIGIN) return;
@@ -73,7 +141,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     };
     yArr.observe(observer);
     return () => yArr.unobserve(observer);
-  }, [session.ySketchStrokes]);
+  }, [session.shared.ySketchStrokes]);
 
   function commitStrokes(next: SketchStroke[]) {
     undoStackRef.current.push(strokes);
@@ -81,7 +149,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     setCanUndo(true);
     setCanRedo(false);
     setStrokes(next);
-    applyStrokesToYArray(session.ySketchStrokes, next);
+    applyStrokesToYArray(session.shared.ySketchStrokes, next);
   }
 
   function handleAddStroke(stroke: SketchStroke) {
@@ -102,7 +170,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     if (!prev) return;
     redoStackRef.current.push(strokes);
     setStrokes(prev);
-    applyStrokesToYArray(session.ySketchStrokes, prev);
+    applyStrokesToYArray(session.shared.ySketchStrokes, prev);
     setCanUndo(undoStackRef.current.length > 0);
     setCanRedo(true);
   }
@@ -112,7 +180,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     if (!next) return;
     undoStackRef.current.push(strokes);
     setStrokes(next);
-    applyStrokesToYArray(session.ySketchStrokes, next);
+    applyStrokesToYArray(session.shared.ySketchStrokes, next);
     setCanUndo(true);
     setCanRedo(redoStackRef.current.length > 0);
   }
@@ -124,7 +192,7 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
       const editor = MilkdownEditor.make();
       editor.config((ctx) => {
         ctx.set(rootCtx, root);
-        // Empty on purpose: session.yXmlFragment is already hydrated with the note's real
+        // Empty on purpose: session.shared.yXmlFragment is already hydrated with the note's real
         // content by the time JoinedSession resolves (see that field's own doc comment in
         // yjsBridge.ts) - ySyncPlugin (registered below) binds to that, not to this default.
         // Mirrors SharedNoteView.tsx's identical initialContent="" for the desktop guest view,
@@ -136,14 +204,15 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
         editor,
         noteId,
         {
-          yXmlFragment: session.yXmlFragment,
+          yXmlFragment: session.shared.yXmlFragment,
           canEdit,
           awareness: session.awareness,
-          ySketchStrokes: session.ySketchStrokes,
+          ySketchStrokes: session.shared.ySketchStrokes,
           resolveAsset: session.resolveAsset,
         },
         setSelectionState,
         session.features.codeBlock,
+        paginated ? { metricsRef: paginationMetricsRef, onLayoutChanged: setPageRects } : undefined,
       );
       return editor;
       // Mounted only once per BrowserEditor instance - the parent (browser-guest/App.tsx) swaps
@@ -156,6 +225,24 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
   );
 
   const run = useCallback((action: (ctx: Ctx) => unknown) => get()?.action(action), [get]);
+
+  // Keeps paginationLayout.ts's live metrics ref up to date as PageSetup or `look` changes, and
+  // forces a recompute - see Editor.tsx's identical effect for the full reasoning, including why
+  // `zoom` is deliberately not a dependency here anymore and why `look` (as `layoutKey`) is.
+  useEffect(() => {
+    if (!paginated) return;
+    paginationMetricsRef.current = {
+      usablePageHeightPx: pageHeightPx - 2 * pageVerticalMarginPx,
+      marginTopPx: pageVerticalMarginPx,
+      marginBottomPx: pageVerticalMarginPx,
+      layoutKey: look,
+    };
+    run((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      view.dispatch(view.state.tr);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paginated, pageHeightPx, pageVerticalMarginPx, look]);
 
   // Tells every image NodeView to recompute its ruled-paper alignment compensation whenever
   // `look` changes - mirrors Editor.tsx's identical effect (see NOTE_LOOK_CHANGED_EVENT's own
@@ -214,10 +301,40 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
     const file = Array.from(e.clipboardData.items)
       .find((item) => item.kind === "file" && item.type.startsWith("image/"))
       ?.getAsFile();
-    if (!file) return;
-    e.preventDefault();
-    e.stopPropagation();
-    void insertImageFile(file);
+    if (file) {
+      e.preventDefault();
+      e.stopPropagation();
+      void insertImageFile(file);
+      return;
+    }
+
+    // Plain multi-line text with no text/html (a lorem-ipsum generator, a PDF, a terminal, "paste
+    // and match style") arrives at Milkdown's own paste handling (@milkdown/plugin-clipboard) as a
+    // raw markdown *source* string, which it runs through the CommonMark parser - and CommonMark
+    // joins any run of consecutive non-blank lines with no blank line between them into a single
+    // paragraph node. paginationLayout.ts can only inject a page-break margin *before* a top-level
+    // block, never inside one (top-level blocks are atomic there by design - see its own comment),
+    // so that single oversized paragraph just overflows straight through the page boundary instead
+    // of breaking the way the same text typed line-by-line (Enter makes a new paragraph each time)
+    // would. Rebuilding one plain paragraph per source line here, before Milkdown's handler ever
+    // sees the event, makes a paste land in the same per-line shape typing it would have produced,
+    // so the existing per-block pagination logic breaks it across pages correctly. Same fix as
+    // Editor.tsx's handleEditorPaste - see its comment for the full reasoning.
+    const text = e.clipboardData.getData("text/plain");
+    const html = e.clipboardData.getData("text/html");
+    if (!html && text.includes("\n")) {
+      e.preventDefault();
+      e.stopPropagation();
+      run((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const schema = ctx.get(schemaCtx);
+        const paragraphType = schema.nodes.paragraph;
+        const lines = text.split(/\r\n|\r|\n/);
+        const nodes = lines.map((line) => (line.length > 0 ? paragraphType.create(null, schema.text(line)) : paragraphType.create()));
+        const slice = new Slice(Fragment.fromArray(nodes), 0, 0);
+        view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView());
+      });
+    }
   }
 
   return (
@@ -248,31 +365,83 @@ function BrowserEditorBody({ session, canEdit, noteId }: BrowserEditorProps) {
           onInsertImage={() => fileInputRef.current?.click()}
           uploadError={uploadError}
           onToggleSketchMode={() => setSketchMode(true)}
+          paginated={paginated}
+          pageSetup={pageSetup}
+          onChangePageSetup={handleChangePageSetup}
+          onPrint={handlePrint}
+          zoom={zoom}
+          onZoomOut={handleZoomOut}
+          onZoomIn={handleZoomIn}
         />
       )}
       <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
       <div
-        className={`prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`}
+        data-paginated={paginated || undefined}
+        className={
+          paginated
+            ? `prose-note flex-1 overflow-auto px-8 py-10 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`
+            : `prose-note flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`
+        }
       >
-        {/* Must be `.prose-note`'s direct child and `position: relative` - the note-look-paper/
-            index-card rule-line background (index.css) is a ::before on exactly this element,
-            positioned absolutely against it. Without a positioned ancestor here, that ::before
-            falls back to the page's root containing block instead - painting behind the title
-            bar/toolbar too, and phased against the wrong top edge so it no longer lines up with
-            the actual text baseline. Mirrors Editor.tsx's sketchWrapperRef div. */}
-        <div className="relative min-h-full" onPasteCapture={handleEditorPaste}>
-          <Milkdown />
-          <SketchLayer
-            className="absolute inset-0"
-            active={canEdit && sketchMode}
-            strokes={strokes}
-            tool={sketchTool}
-            color={sketchColor}
-            width={sketchWidth}
-            onAddStroke={handleAddStroke}
-            onEraseStrokes={handleEraseStrokes}
-          />
-        </div>
+        {/* `.note-content-surface` must be a positioned element (`relative` or `absolute`) - the
+            note-look-paper/index-card rule-line background (index.css) is a ::before on exactly
+            that class, positioned absolutely against it. Without a positioned ancestor here, that
+            ::before falls back to the page's root containing block instead - painting behind the
+            title bar/toolbar too, and phased against the wrong top edge so it no longer lines up
+            with the actual text baseline. Mirrors Editor.tsx's sketchWrapperRef div. */}
+        {paginated ? (
+          <div ref={zoomStageRef} className="zoom-stage relative mx-auto" style={{ width: pageWidthPx * zoom, height: pageContentHeightPx * zoom }}>
+            <div
+              ref={sketchWrapperRef}
+              className="note-content-surface absolute left-0 top-0"
+              style={{
+                width: pageWidthPx,
+                minHeight: pageHeightPx,
+                paddingLeft: pageMarginPx,
+                paddingRight: pageMarginPx,
+                paddingTop: pageVerticalMarginPx,
+                paddingBottom: pageVerticalMarginPx,
+                transform: `scale(${zoom})`,
+                transformOrigin: "top left",
+              }}
+              onPasteCapture={handleEditorPaste}
+            >
+              <PageBackdrop
+                pages={pageRects}
+                width={pageWidthPx}
+                marginPx={pageMarginPx}
+                verticalMarginPx={pageVerticalMarginPx}
+                look={look}
+              />
+              <Milkdown />
+              <SketchLayer
+                className="absolute inset-0"
+                active={canEdit && sketchMode}
+                strokes={strokes}
+                tool={sketchTool}
+                color={sketchColor}
+                width={sketchWidth}
+                onAddStroke={handleAddStroke}
+                onEraseStrokes={handleEraseStrokes}
+                zoom={zoom}
+              />
+            </div>
+          </div>
+        ) : (
+          <div ref={sketchWrapperRef} className="note-content-surface relative min-h-full" onPasteCapture={handleEditorPaste}>
+            <Milkdown />
+            <SketchLayer
+              className="absolute inset-0"
+              active={canEdit && sketchMode}
+              strokes={strokes}
+              tool={sketchTool}
+              color={sketchColor}
+              width={sketchWidth}
+              onAddStroke={handleAddStroke}
+              onEraseStrokes={handleEraseStrokes}
+            />
+          </div>
+        )}
       </div>
     </>
   );

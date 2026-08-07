@@ -330,6 +330,105 @@ input,
   background-color: rgb(var(--accent-rgb) / 0.15);
 }
 
+/* The `voiceNoteInline` atom's glyph (see milkdown/voiceNoteInline.ts/voiceNoteInlineView.ts) - a
+   small clickable inline marker planted right at the cursor by the toolbar's mic button. Same
+   inline-flex/vertical-align sizing as .note-pin above, so it sits consistently with surrounding
+   text regardless of soft-wrap - the whole point of this atom vs. the legacy margin controls
+   below, which anchor to a block's first visual line instead. */
+.voice-note-inline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* `middle`, not a fixed em offset like .note-pin's -0.15em: paragraph/heading line-height is
+     forced to a whole `--rule` (27-34px, see the ruled-paper baseline-grid comment further up)
+     for the page-line background to land correctly, far taller than this glyph's own font-size-
+     relative box - a fixed baseline-relative offset tuned for one specific box height reads as
+     "sitting low" once the box is anywhere near that tall (the recording widget, ~1.5em) and
+     doesn't even center the plain 1.1em glyph against the visibly tall row. `middle` centers
+     against the row's midline instead, which stays correct across every state's height. */
+  vertical-align: middle;
+  cursor: pointer;
+}
+.voice-note-inline-idle,
+.voice-note-inline-pill {
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 3px;
+  color: rgb(var(--accent-rgb));
+  opacity: 0.75;
+  transition: opacity 0.15s, background-color 0.15s;
+}
+.voice-note-inline-idle:hover,
+.voice-note-inline-pill:hover {
+  opacity: 1;
+  background-color: rgb(var(--accent-rgb) / 0.15);
+}
+
+/* The atom's in-session marker: while a recording is running, the glyph stays exactly the size of
+   the idle one and just pulses in place. All the controls (pause/restart/delete/save) live in
+   VoiceRecorderPopover.tsx anchored to this glyph rather than inline in the text - a widget that
+   grew inline reflowed the whole line the moment recording started, and there isn't room for four
+   controls mid-sentence anyway. */
+.voice-note-inline-live {
+  position: relative;
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 999px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  cursor: default;
+  animation: voice-recording-pulse 1.4s ease-in-out infinite;
+}
+
+/* The popover's own mic orb (VoiceRecorderPopover.tsx). `is-counting` is the pre-roll (a plain
+   number, no pulse - nothing is being captured yet); `is-live` adds the outward ring that reads
+   as "the mic is open right now", which deliberately stops the instant recording is paused. */
+.voice-rec-orb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  transition: background-color 0.15s;
+}
+.voice-rec-orb.is-counting {
+  background: rgb(var(--accent-rgb) / 0.12);
+  color: rgb(var(--accent-rgb));
+  cursor: pointer;
+}
+.voice-rec-orb.is-counting:hover {
+  background: rgb(var(--accent-rgb) / 0.2);
+}
+.voice-rec-orb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  border: 2px solid var(--danger);
+  opacity: 0;
+}
+.voice-rec-orb.is-live::after {
+  animation: voice-rec-ring 1.6s ease-out infinite;
+}
+.voice-rec-orb.is-live > svg {
+  animation: voice-recording-pulse 1.6s ease-in-out infinite;
+}
+@keyframes voice-rec-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
 /* Voice-note margin controls (see milkdown/voiceNoteGrips.ts) - floated just past a paragraph/
    heading/list_item's own right edge, in .prose-note's padding gutter, never overlapping the
    text column itself. One `.voice-line-control` exists per eligible line; its `data-state`
@@ -481,7 +580,9 @@ input,
    Code blocks/tables opt out (they carry their own opaque background already, so
    misaligned lines are naturally hidden rather than fixed) and can locally break
    the grid for content that follows - an accepted limitation. */
-.note-look-grid {
+/* Non-paginated (Default) notes: `.prose-note` IS the content area, so the look's tint/pattern
+   painting straight onto it is correct - there's no separate "page" to distinguish it from. */
+.prose-note:not([data-paginated]).note-look-grid {
   background-color: var(--look-tint);
   background-image: radial-gradient(circle, var(--look-grid) 1px, transparent 1px);
   background-size: 22px 22px;
@@ -490,9 +591,12 @@ input,
 .prose-note.note-look-paper,
 .prose-note.note-look-index-card {
   --rule: 27px;
+}
+.prose-note:not([data-paginated]).note-look-paper,
+.prose-note:not([data-paginated]).note-look-index-card {
   background-color: var(--look-tint);
 }
-.prose-note.note-look-paper {
+.prose-note:not([data-paginated]).note-look-paper {
   /* Sits inside the editor's own left padding (px-12/px-6/px-3 in Editor.tsx,
      which shrink at the @max-lg/@max-sm container-query breakpoints), offset
      a bit further left so the line never touches the text it's next to. */
@@ -507,30 +611,26 @@ input,
   background-attachment: local;
 }
 @container (max-width: 32rem) {
-  .prose-note.note-look-paper {
+  .prose-note:not([data-paginated]).note-look-paper {
     --look-margin-x: 1rem;
   }
 }
 @container (max-width: 24rem) {
-  .prose-note.note-look-paper {
+  .prose-note:not([data-paginated]).note-look-paper {
     --look-margin-x: 0.4rem;
   }
 }
-/* The rule-line pattern is a ::before on the content wrapper div (Editor.tsx's
-   sketchWrapperRef, .prose-note's one and only direct child - already
-   `position: relative`), not on .prose-note itself: .prose-note is the
-   scrolling element, so an absolutely-positioned child of *it* is pinned to
-   its viewport-sized box and doesn't travel with the scrolled content the
-   way a normal in-flow descendant does - lines would stop updating below the
-   first screenful. The wrapper div is a normal in-flow child that already
-   grows to the full scrolled height, so anchoring here scrolls correctly for
-   free. It has no padding of its own (text starts right at its edges), which
-   also gives correct top/bottom clipping with no extra work - the pattern
-   only needs to be deliberately pushed left/right past the wrapper's own
-   edges (with negative inset, not padding) to reach .prose-note's real
-   padding edges instead of stopping at the text column. */
-.prose-note.note-look-paper > div::before,
-.prose-note.note-look-index-card > div::before {
+/* The rule-line pattern is a ::before on `.note-content-surface` (Editor.tsx's/BrowserEditor.tsx's
+   sketchWrapperRef, already `position: relative` here), not on .prose-note itself: .prose-note is
+   the scrolling element, so an absolutely-positioned child of *it* is pinned to its viewport-sized
+   box and doesn't travel with the scrolled content - lines would stop updating below the first
+   screenful. sketchWrapperRef is a normal in-flow child that already grows to the full scrolled
+   height, so anchoring here scrolls correctly for free. `:not([data-paginated])` because a
+   Fixed-Size note's `.note-content-surface` is the *whole multi-page canvas*, not one page - see
+   `.page-surface` below (components/PageBackdrop.tsx) for why pagination needs a background that
+   restarts at every page's own top instead of one continuous one painted across all of them. */
+.prose-note:not([data-paginated]).note-look-paper .note-content-surface::before,
+.prose-note:not([data-paginated]).note-look-index-card .note-content-surface::before {
   content: "";
   position: absolute;
   top: 0;
@@ -556,15 +656,15 @@ input,
   background-size: 100% var(--rule);
 }
 @container (max-width: 32rem) {
-  .prose-note.note-look-paper > div::before,
-  .prose-note.note-look-index-card > div::before {
+  .prose-note:not([data-paginated]).note-look-paper .note-content-surface::before,
+  .prose-note:not([data-paginated]).note-look-index-card .note-content-surface::before {
     left: -1.5rem;
     right: -1.5rem;
   }
 }
 @container (max-width: 24rem) {
-  .prose-note.note-look-paper > div::before,
-  .prose-note.note-look-index-card > div::before {
+  .prose-note:not([data-paginated]).note-look-paper .note-content-surface::before,
+  .prose-note:not([data-paginated]).note-look-index-card .note-content-surface::before {
     left: -0.75rem;
     right: -0.75rem;
   }
@@ -572,10 +672,148 @@ input,
 .prose-note.note-look-index-card {
   --rule: 34px;
 }
-.note-look-index-card > * {
+/* :not([data-paginated]) here for the same reason as above: in a Fixed-Size note this selector's
+   direct child is `.zoom-stage`, not the page content itself, and capping its width to 38rem
+   would shrink the whole page instead of just narrowing the index-card text column - the page
+   already has its own width from PageSetupDropdown. */
+.prose-note:not([data-paginated]).note-look-index-card > * {
   max-width: 38rem;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* Fixed-Size (paginated) notes: one `.page-surface` div per page (components/PageBackdrop.tsx),
+   each an independent copy of the look's background rather than one continuous background shared
+   by the whole multi-page canvas - see PageBackdrop.tsx's own comment for why. Each page-surface
+   spans its *entire* page rect, margin included (it's the same rect paginationLayout.ts computed
+   the page break from), so unlike the non-paginated rules above - painted on an element with no
+   padding of its own, where the text starts right at (0,0) - these need to explicitly push the
+   pattern down/right by that page's own top-left margin (`--page-margin`, set as an inline custom
+   property per page since it comes from PageSetup, not a static value) to land under the text
+   instead of in the margin above/left of it. `--rule`/`--look-tint`/`--look-rule`/`--look-margin`
+   are read straight off the ancestor `.prose-note.note-look-*` (custom properties inherit through
+   `.zoom-stage`/`.note-content-surface` regardless of neither carrying a note-look-* class itself),
+   so they don't need redeclaring here. */
+.page-surface {
+  position: absolute;
+  left: 0;
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-soft);
+}
+.page-surface.note-look-grid {
+  background-color: var(--look-tint);
+  background-image: radial-gradient(circle, var(--look-grid) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.page-surface.note-look-paper,
+.page-surface.note-look-index-card {
+  background-color: var(--look-tint);
+}
+.page-surface.note-look-paper {
+  /* The vertical left-margin line, on `.page-surface` itself (not the rule-lines element below):
+     meant to run the page's full height uninterrupted, the same way it does on a real sheet of
+     ruled paper - unlike the *horizontal* rule lines, it's never masked out of the blank header/
+     footer band. `calc(var(--page-margin) - 8px)`: 8px short of the text's own left edge,
+     mirroring the ~8px gap the non-paginated version above gets from its fixed 2.5rem offset
+     sitting just inside its own ~3rem left padding. */
+  background-image: linear-gradient(90deg, var(--look-margin) 0, var(--look-margin) 1.5px, transparent 1.5px);
+  background-position: calc(var(--page-margin) - 8px) 0;
+  background-repeat: no-repeat;
+}
+/* The repeating rule-line pattern lives on its own element (components/PageBackdrop.tsx's
+   `.page-rule-lines`, one per page, stacked between `.page-surface` and the live text) rather
+   than as another `.page-surface` background layer, specifically so it can be *masked* out of the
+   blank header/footer band via `mask-image` - a genuine alpha mask, unlike the two-solid-color-
+   layers-on-top trick an earlier version of this used, which painted `--look-tint` "masks" over
+   the pattern to hide it. That looked right in isolation but was never actually opaque: `--look-
+   tint` is deliberately translucent (a *tint* over whatever's behind it, `rgba(..., 0.55)` for
+   Paper - see its own definition), so stacking it over the rule pattern only faded the lines by
+   ~55%, not hid them - left as a faint but real ghost line inside the "blank" band, reported as
+   pages looking inconsistent depending on incidental things like the browser's compositing of the
+   layers behind it. `mask-image` doesn't have this problem: it's not paint that composites with
+   what's behind it, it's an alpha multiplier on this element's *own* rendered pixels, so the
+   masked band renders as genuinely, fully transparent - not faded, gone - regardless of what look
+   or backdrop happens to be active behind it. */
+.page-rule-lines {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--look-rule) 0,
+    var(--look-rule) 1px,
+    transparent 1px,
+    transparent var(--rule)
+  );
+  background-position: 0 calc(var(--page-margin-top) + var(--rule) - 1px);
+  background-repeat: repeat;
+  background-size: 100% var(--rule);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent var(--page-margin-top),
+    black var(--page-margin-top),
+    black calc(100% - var(--page-margin-top)),
+    transparent calc(100% - var(--page-margin-top)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent var(--page-margin-top),
+    black var(--page-margin-top),
+    black calc(100% - var(--page-margin-top)),
+    transparent calc(100% - var(--page-margin-top)),
+    transparent 100%
+  );
+}
+/* Fixed-Size notes (Editor.tsx's `paginated` prop): a fixed-width page column, same look as a
+   Default note otherwise - see milkdown/paginationLayout.ts for the live measurement engine
+   that reserves real space between pages (via a `[data-page-start-gap]` widget div immediately
+   before the content block that starts each new page) and components/PageBackdrop.tsx's
+   `.page-surface` for the per-page sheet drawn inside that same real gap. Resizing the window
+   never changes the page width or line-wrapping - narrower than the page just scrolls
+   horizontally instead. */
+.prose-note[data-paginated] {
+  overflow-x: auto;
+}
+/* `user-select: none` is the whole point of these being separate elements rather than margin on
+   the content block itself (see paginationLayout.ts's `appliedMargin` comment): without it, a
+   selection (or Cmd/Ctrl+A) spanning a page break paints the accent-colored `::selection`
+   background clear across the empty page gap, exactly like `.page-break` below already avoids
+   for the manual page-break node. */
+[data-page-start-gap] {
+  display: block;
+  user-select: none;
+}
+[data-inline-page-start] {
+  user-select: none;
+}
+.page-break {
+  margin: 1.5rem 0;
+  padding: 0.375rem 0;
+  border-top: 1px dashed var(--border-strong);
+  border-bottom: 1px dashed var(--border-strong);
+  text-align: center;
+  user-select: none;
+}
+.page-break-label {
+  color: var(--text-tertiary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+@media print {
+  .page-break {
+    border: none;
+    break-after: page;
+  }
+  .page-break-label {
+    display: none;
+  }
 }
 .prose-note.note-look-paper :is(h1, h2, h3, p, li, blockquote),
 .prose-note.note-look-index-card :is(h1, h2, h3, p, li, blockquote) {
@@ -885,6 +1123,19 @@ input,
   z-index: 30;
   resize: none;
   border-radius: 0;
+}
+/* Fixed-Size notes only: while one of this note's code blocks is expanded (class set by
+   codeBlockGrips.ts's setExpanded), the zoom `transform: scale(zoom)` React puts inline on
+   `.note-content-surface` (see Editor.tsx's/BrowserEditor.tsx's sketchWrapperRef) is switched
+   off, so `.cb-expanded` above is fixed against the same non-scrolling ancestor a Default note's
+   already uses - see setExpanded's own comment for why a transformed ancestor otherwise both
+   clips the expanded block to the scrolling note area and scrolls it away with the content.
+   `!important` because that transform is an inline style; the `[data-paginated]` scope keeps
+   this off non-paginated notes, whose content wrapper shares the `.note-content-surface` class
+   (see the print rules at the bottom of this file for the same scoping, for the same reason)
+   but carries no transform to begin with. */
+.prose-note[data-paginated].cb-has-expanded .note-content-surface {
+  transform: none !important;
 }
 /* @codemirror/search only ever mounts an empty placeholder panel here (see
    codeBlock.ts's `createPanel`) - the real find/replace UI is the draggable
@@ -1546,5 +1797,79 @@ input,
    person, same as the cursor above. */
 .ProseMirror-yjs-selection {
   border-radius: 2px;
+}
+
+/* ---------- Print / export (Fixed-Size notes - see Editor.tsx's/BrowserEditor.tsx's
+   handlePrint) ---------- */
+/* The actual page dimensions/margins (from the note's PageSetup) are injected as a separate,
+   disposable <style> tag right before printing rather than declared here - see handlePrint's
+   own comment for why a static `@page { size: var(...) }` rule isn't reliable across
+   browsers/webviews. This block hides everything except the note's own `.prose-note` content
+   via the classic visibility-based "print just this element" technique - deliberately NOT
+   keyed off the surrounding chrome's structure (e.g. ".app-shell > *:not(main)"), since the
+   desktop app (Sidebar + <main>) and the browser-guest build (no <main> at all, just a title
+   bar + editor) have different DOM shapes around the same `.prose-note` - see
+   src/browser-guest/App.tsx/BrowserEditor.tsx. `visibility` (not `display: none`) keeps
+   ancestors in the layout so hidden siblings can't collapse the page before `.prose-note` is
+   repositioned to reclaim it via `position: absolute` below. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .prose-note,
+  .prose-note * {
+    visibility: visible;
+  }
+  .prose-note {
+    position: absolute;
+    inset: 0;
+    overflow: visible !important;
+    height: auto !important;
+    padding: 0 !important;
+  }
+  /* Fixed-Size notes only: `.zoom-stage` (Editor.tsx's/BrowserEditor.tsx's zoomStageRef) reserves
+     the on-screen *zoomed* footprint via inline width/height so scrolling reaches every part of
+     an oversized page, and `.note-content-surface` (sketchWrapperRef) carries the actual
+     `transform: scale(zoom)` - see the `zoom` state's own comment in Editor.tsx. The printed/
+     exported PDF should always be the note at its real, unscaled size regardless of whatever zoom
+     is on screen, and `!important` here is what makes that true without any JS having to save and
+     restore those inline styles around `window.print()`: a JS-toggled inline style depends on
+     `afterprint` actually firing to undo itself, which isn't reliable for a native OS print panel
+     (confirmed live - cancelling the panel and clicking elsewhere left the page permanently
+     shifted, since nothing else ever touches those two properties once React sees no reason to).
+     This override only ever applies inside the browser's own print rendering pass, so there is
+     nothing to restore afterward - the on-screen DOM's inline styles are never touched at all.
+     `position: static` un-does `note-content-surface`'s `position: absolute` (needed on screen so
+     `transform: scale` has a stable zoomed-footprint parent to be measured against) so it goes
+     back to being a normal in-flow child that contributes its own height to the page for print
+     pagination, exactly like a Default (non-paginated) note's content wrapper already does. */
+  .zoom-stage {
+    width: auto !important;
+    height: auto !important;
+  }
+  /* Scoped to `[data-paginated]` (Fixed-Size notes only, see `.prose-note[data-paginated]` above)
+     - `.note-content-surface` is also the non-paginated content wrapper's class (for the
+     note-look-paper/index-card ::before hook, see that rule's own comment), where it's a normal
+     `position: relative` element with no `transform` at all - forcing `position: static` there too
+     would knock that ::before loose from its positioning anchor for no reason, since neither
+     property needs overriding outside the paginated case this rule exists for. */
+  .prose-note[data-paginated] .note-content-surface {
+    position: static !important;
+    transform: none !important;
+  }
+  /* `data-page-start` is a permanent marker (paginationLayout.ts's decorations put it on whichever
+     block currently starts a page, live, not something toggled just for printing) - a plain,
+     always-on print rule here means the printed/exported PDF's page breaks land at exactly those
+     same points, with nothing for handlePrint to toggle or clean up around `window.print()`. */
+  [data-page-start] {
+    break-before: page;
+  }
+  /* Same idea as `[data-page-start]` above, for a page break paginationLayout.ts placed *inside*
+     a single oversized paragraph/heading (see computeIntraBlockSplits) rather than before a whole
+     block - the span it's on is forced to `display: block` on screen for exactly this reason, so
+     it's a valid `break-before` target here too. */
+  [data-inline-page-start] {
+    break-before: page;
+  }
 }
 

@@ -53,9 +53,18 @@ export function ToolbarPopover({
     place();
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
+    // The panel's own content can grow after first placement without any window resize/scroll -
+    // e.g. VoiceNotePopover's "..." menu opening beneath the row it's anchored to - and `place()`
+    // above only reacts to those two events. Without also re-running it when the panel's own
+    // rendered height changes, `fitsBelow`'s flip-above-if-needed check stays stuck on the
+    // pre-menu-opened height, so the popover doesn't notice it now overflows the viewport bottom
+    // and the extra content renders off-screen.
+    const resizeObserver = new ResizeObserver(place);
+    if (menuRef.current) resizeObserver.observe(menuRef.current);
     return () => {
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
+      resizeObserver.disconnect();
     };
   }, [anchorRef]);
 

@@ -1,15 +1,15 @@
 import * as Y from "yjs";
 import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
-import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { canEdit, getAcl, touchLastSeen } from "./acl";
 import { createAssetChannel } from "./assetSync";
 import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
+import { attachSharedTypesForKind, type KindSharedTypes } from "./kindSharedTypes";
+import { seedSharedTypesFromDisk, wireSharedTypePersistence } from "./kindPersistence";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
-import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabAcl, FeatureFlags, SketchStroke } from "../types";
-import { fsAssetStore, readNote, readSketch, titleFromNotePath, writeSketch } from "../utils/fsNotes";
-import { parseMarkdownToProseMirrorDoc } from "../milkdown/headlessParse";
+import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText } from "./sessionProtocol";
+import type { CollabAcl, FeatureFlags, NoteKind } from "../types";
+import { fsAssetStore, getNoteKind, titleFromNotePath } from "../utils/fsNotes";
 
 /**
  * Owner side of the live CRDT sync engine, layered on top of signaling.ts's transport and
@@ -62,18 +62,18 @@ function takeToken(bucket: RateLimiter): boolean {
 }
 
 export interface HostedSession {
-  /** Bound into the owner's own Milkdown instance via collabSession - see Editor.tsx/setup.ts. */
-  yXmlFragment: Y.XmlFragment;
-  /** Live cursors/selections and presence - bound into the owner's own editor the same way as
-   * yXmlFragment, and also the single source of truth the UI reads to show "who's here" (see
+  /** Which view/editor this note opens with - determines which shared type(s) `shared` exposes.
+   * See kindSharedTypes.ts. */
+  kind: NoteKind;
+  /** This note's kind-appropriate Yjs shared type(s) - e.g. `yXmlFragment`/`ySketchStrokes` for
+   * Default/Fixed-Size, bound into the owner's own editor via collabSession (see
+   * Editor.tsx/setup.ts). Seeded from disk and kept persisted back to it by
+   * kindPersistence.ts - see seedSharedTypesFromDisk/wireSharedTypePersistence below. */
+  shared: KindSharedTypes;
+  /** Live cursors/selections and presence - bound into the owner's own editor alongside
+   * `shared`, and also the single source of truth the UI reads to show "who's here" (see
    * usePresence in Header.tsx/SharedNoteView.tsx) rather than a separately-tracked list. */
   awareness: Awareness;
-  /** Live ink strokes for Sketch mode - a second shared type on the same Y.Doc as yXmlFragment,
-   * so it rides the exact same welcome-snapshot catch-up and update batching/broadcast with no
-   * separate wire protocol. Seeded from the note's `.sketch.json` sidecar (see fsNotes.ts) below,
-   * and mirrored back to it on every change - the file stays the durable source of truth for
-   * strokes the same way the `.md` file already is for yXmlFragment. */
-  ySketchStrokes: Y.Array<SketchStroke>;
   /** Resolves an image node's `src` (a content hash, or a legacy relative attachment path) to its
    * bytes - checks this device's own disk first, then asks whichever connected collaborator(s)
    * have it (see assetSync.ts). Passed through to the image NodeView (imageView.ts) as its
@@ -100,14 +100,14 @@ export interface HostedSession {
 export async function hostSession(notePath: string, identity: DeviceIdentity, features: FeatureFlags): Promise<HostedSession> {
   const acl = await getAcl(notePath);
   if (!acl) throw new Error("This note has never been shared.");
+  const kind = await getNoteKind(notePath);
 
   // Identifies this specific call/Y.Doc instance to guests - see sessionProtocol.ts's "welcome"
   // field for why, and yjsBridge.ts for how a guest uses it to tell a harmless repeat welcome
   // apart from a real resync after this device restarted hosting.
   const generation = crypto.randomUUID();
   const ydoc = new Y.Doc();
-  const yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
-  const ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
+  const shared = attachSharedTypesForKind(ydoc, kind);
   // Destroyed automatically when ydoc is (see y-protocols/awareness.js: it registers its own
   // `doc.on('destroy', ...)` cleanup) - no separate teardown needed in close() below.
   const awareness = new Awareness(ydoc);
@@ -120,16 +120,10 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
   // - can observe or broadcast it. A bare new Y.Doc must never reach a real ProseMirror editor
   // via ySyncPlugin: that plugin forcibly rewrites the editor to match whatever the fragment
   // holds, and the autosave that follows writes that straight back over the real .md file -
-  // this exact gap previously wiped two real notes. See prosemirrorToYXmlFragment's own doc
+  // this exact gap previously wiped two real notes. See seedSharedTypesFromDisk's own doc
   // comment: it's meant precisely for "importing existing content to a Y.Doc for the first
-  // time," and must run before this fragment is exposed to any sync machinery.
-  const onDiskContent = await readNote(notePath);
-  if (onDiskContent.length > 0) {
-    const doc = await parseMarkdownToProseMirrorDoc(onDiskContent, notePath);
-    prosemirrorToYXmlFragment(doc, yXmlFragment);
-  }
-  const onDiskSketch = await readSketch(notePath);
-  if (onDiskSketch && onDiskSketch.strokes.length > 0) ySketchStrokes.push(onDiskSketch.strokes);
+  // time," and must run before `shared` is exposed to any sync machinery.
+  await seedSharedTypesFromDisk(notePath, shared);
 
   const { roomId, password } = await deriveSessionRoom(acl.noteId);
   const room = await joinTrysteroRoom(password, roomId);
@@ -157,17 +151,10 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
     return assetChannel.fetch(key, [...authorizedPeers.keys()]);
   }
 
-  // Debounced the same way Editor.tsx's own sketch autosave already is (see its
-  // debouncedSaveSketch) - a live stroke fires many small Y.Array ops per second while drawing,
-  // and the file only needs to reflect wherever the ink ends up, not every intermediate point.
-  let sketchSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  ySketchStrokes.observe(() => {
-    if (sketchSaveTimer) clearTimeout(sketchSaveTimer);
-    sketchSaveTimer = setTimeout(() => {
-      sketchSaveTimer = null;
-      void writeSketch(notePath, { version: 1, strokes: ySketchStrokes.toArray() });
-    }, 500);
-  });
+  // Kind-dispatched disk persistence (debounced the same way Editor.tsx's own sketch autosave
+  // already is) - see kindPersistence.ts's own comment for why non-Default/Fixed-Size kinds
+  // need this rather than piggybacking on an always-open editor's autosave.
+  const persistence = wireSharedTypePersistence(notePath, shared);
 
   ctrl.onMessage = async (message, { peerId }) => {
     if (message.type !== "hello") return;
@@ -205,6 +192,7 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
         // valid Record<string, boolean> - TS just doesn't infer that automatically for a closed
         // interface without an explicit index signature (see sessionProtocol.ts's own comment).
         features: features as unknown as Record<string, boolean>,
+        kind,
       },
       { target: peerId },
     );
@@ -367,8 +355,8 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
   }
 
   return {
-    yXmlFragment,
-    ySketchStrokes,
+    kind,
+    shared,
     resolveAsset,
     awareness,
     notifyAclChanged,
@@ -393,11 +381,8 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
         clearTimeout(contentBatchTimer);
         contentBatchTimer = null;
       }
-      if (sketchSaveTimer) {
-        clearTimeout(sketchSaveTimer);
-        sketchSaveTimer = null;
-        void writeSketch(notePath, { version: 1, strokes: ySketchStrokes.toArray() });
-      }
+      void persistence.flush();
+      persistence.dispose();
       setTimeout(() => {
         room.leave();
         ydoc.destroy();

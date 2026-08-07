@@ -38,7 +38,10 @@ function resolveVoiceSrc(relPath: string, bytes: Uint8Array): string {
   return url;
 }
 
-const WAVEFORM_BAR_COUNT = 40;
+// Tuned against the panel's own width (w-72, close to VoiceRecorderPopover's w-64 so the two
+// voice-note panels read as the same object in two states): fewer bars than the width used to
+// allow, keeping the ~2px gap between them rather than letting them close up into a solid block.
+const WAVEFORM_BAR_COUNT = 34;
 // Flat placeholder shown while the clip is still being decoded into real peaks (see
 // computePeaks) - a constant, not a fake waveform shape, so it doesn't read as real data.
 const PLACEHOLDER_PEAKS = Array.from({ length: WAVEFORM_BAR_COUNT }, () => 0.18);
@@ -193,7 +196,7 @@ export function VoiceNotePopover({ voiceSrc, voiceDur, anchorRef, onAppend, onRe
     <ToolbarPopover
       anchorRef={anchorRef}
       onClose={onClose}
-      className="glass-panel shadow-app-lg border-subtle w-80 rounded-2xl border p-3"
+      className="glass-panel shadow-app-lg border-subtle w-72 rounded-2xl border p-3"
     >
       <div className="flex items-center justify-between px-1 pb-2.5">
         <span className="text-primary text-sm font-medium">Voice Note</span>

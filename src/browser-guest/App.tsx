@@ -7,7 +7,7 @@ import type { JoinedSession } from "../collab/yjsBridge";
 import type { CollabRole } from "../types";
 import { idbAssetStore } from "./idbAssetStore";
 import { PinEntry } from "./PinEntry";
-import { BrowserEditor } from "./BrowserEditor";
+import { GUEST_KIND_VIEWS } from "./kindViews";
 
 const DISPLAY_NAME_KEY = "cleanotes:browser-collab:display-name";
 
@@ -184,11 +184,22 @@ export function BrowserGuestApp() {
             onSubmit={(pin, name) => void handleSubmitPin(pin, name)}
           />
         ) : status === "connected" && session ? (
-          // Keyed on session.generation so a resync (owner restarted hosting without this
-          // connection ever dropping - see yjsBridge.ts's JoinedSession.generation) remounts
-          // BrowserEditor bound to the fresh yXmlFragment/awareness, instead of an
-          // already-mounted instance going stale against objects that no longer receive updates.
-          <BrowserEditor key={session.generation} session={session} canEdit={canEdit} noteId={link.payload.noteId} />
+          (() => {
+            const KindView = GUEST_KIND_VIEWS[session.kind];
+            if (!KindView) {
+              return (
+                <CenteredMessage
+                  title="Not supported here yet"
+                  body="This note type isn't supported in the browser yet - open it in the CleaNotes desktop app instead."
+                />
+              );
+            }
+            // Keyed on session.generation so a resync (owner restarted hosting without this
+            // connection ever dropping - see yjsBridge.ts's JoinedSession.generation) remounts
+            // the view bound to the fresh shared/awareness, instead of an already-mounted
+            // instance going stale against objects that no longer receive updates.
+            return <KindView key={session.generation} session={session} canEdit={canEdit} noteId={link.payload.noteId} />;
+          })()
         ) : (
           <CenteredMessage
             title={status === "connecting" ? "Connecting…" : "Waiting for the owner to be online"}

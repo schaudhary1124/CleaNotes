@@ -6,6 +6,7 @@ import { $prose } from "@milkdown/kit/utils";
 import { isInlineOnlyChange } from "./docChangeScope";
 import { readAttachment, writeAttachment } from "../utils/fsNotes";
 import type { VoiceNoteAttrs } from "./voiceNoteSchemaExtensions";
+import { VOICE_NOTE_CLICKED_EVENT, type VoiceNoteClickedDetail } from "./voiceNoteInlineView";
 import { VoiceRecording, appendWav, formatDuration } from "./voiceRecording";
 
 // Lucide-style glyphs, inlined - this is a PluginView rendering raw DOM (see
@@ -21,28 +22,9 @@ const STOP_ICON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="current
 const CANCEL_ICON =
   '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>';
 
-/** Fired (bubbling) whenever an occupied line's voice-note pill is clicked, so Editor.tsx - which
- * has no direct reference to any one plugin instance - can open its popover. Same NodeView/
- * PluginView -> React bridge notePinView.ts's NOTE_PIN_CLICKED_EVENT uses. */
-export const VOICE_NOTE_CLICKED_EVENT = "plainotes:voice-note-clicked";
-
-export interface VoiceNoteClickedDetail {
-  id: string;
-  voiceSrc: string;
-  voiceDur: number;
-  /** The pill's own DOM node, so the popover can anchor to it (via ToolbarPopover.tsx). */
-  element: HTMLElement;
-  /** Clears this line's voice-note attachment (attrs reset to null/0) - a live callback
-   * (re-resolving the line's position fresh) rather than one captured at click time, mirroring
-   * notePinView.ts's `remove`. Does not delete the underlying asset file - see this file's own
-   * comment on orphaned assets in voiceNoteSchemaExtensions.ts. */
-  remove: () => void;
-  /** Starts a new recording targeted at this same line in "append" mode: on stop, the new
-   * segment is decoded and concatenated onto the existing clip (see voiceRecording.ts's
-   * appendWav) rather than replacing or playlist-ing it. Swaps this line's control over to the
-   * same on-canvas recording widget a fresh recording uses. */
-  startAppend: () => void;
-}
+// VOICE_NOTE_CLICKED_EVENT/VoiceNoteClickedDetail now live in voiceNoteInlineView.ts (the new
+// inline-atom voice notes, addable via the toolbar's mic button) and are imported above, so this
+// (legacy, per-line) margin UI's pills funnel into the exact same Editor.tsx listener/popover.
 
 type LineNodeType = "paragraph" | "heading" | "list_item" | "table_row" | "table_header_row";
 

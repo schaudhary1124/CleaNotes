@@ -17,8 +17,10 @@ import type {
   CollabAcl,
   FolderEntry,
   NoteEntry,
+  NoteKind,
   NoteLook,
   NoteSummary,
+  PageSetup,
   SketchData,
   StudyItem,
   TreeEntry,
@@ -87,6 +89,12 @@ interface NotesMeta {
   /** Maps a note's relative path to its visual look (see NoteLook). Notes without
    * an entry here use the "plain" look. */
   noteLooks: Record<string, string>;
+  /** Maps a note's relative path to its kind (see NoteKind). Notes without an entry here
+   * use "default" - most notes, since only non-default kinds are ever written here. */
+  noteKinds: Record<string, string>;
+  /** Maps a Fixed-Size note's relative path to its page dimensions/margins (see PageSetup).
+   * Notes without an entry here use DEFAULT_PAGE_SETUP. */
+  pageSetup: Record<string, PageSetup>;
   /** Set of starred note paths (value is always `true` - only presence matters). */
   starred: Record<string, true>;
   /** Trashed items, keyed by their current path under TRASH_DIR. Deliberately NOT touched by
@@ -103,11 +111,13 @@ async function readMeta(): Promise<NotesMeta> {
       folderColors: parsed.folderColors ?? {},
       createdAt: parsed.createdAt ?? {},
       noteLooks: parsed.noteLooks ?? {},
+      noteKinds: parsed.noteKinds ?? {},
+      pageSetup: parsed.pageSetup ?? {},
       starred: parsed.starred ?? {},
       trash: parsed.trash ?? {},
     };
   } catch {
-    return { folderColors: {}, createdAt: {}, noteLooks: {}, starred: {}, trash: {} };
+    return { folderColors: {}, createdAt: {}, noteLooks: {}, noteKinds: {}, pageSetup: {}, starred: {}, trash: {} };
   }
 }
 
@@ -191,6 +201,8 @@ function remapMetaPaths(meta: NotesMeta, oldPath: string, newPath: string): Note
     folderColors: remapPathKeys(meta.folderColors, oldPath, newPath),
     createdAt: remapPathKeys(meta.createdAt, oldPath, newPath),
     noteLooks: remapPathKeys(meta.noteLooks, oldPath, newPath),
+    noteKinds: remapPathKeys(meta.noteKinds, oldPath, newPath),
+    pageSetup: remapPathKeys(meta.pageSetup, oldPath, newPath),
     starred: remapPathKeys(meta.starred, oldPath, newPath),
   };
 }
@@ -203,6 +215,8 @@ function dropMetaPaths(meta: NotesMeta, path: string): NotesMeta {
     folderColors: dropPathKeys(meta.folderColors, path),
     createdAt: dropPathKeys(meta.createdAt, path),
     noteLooks: dropPathKeys(meta.noteLooks, path),
+    noteKinds: dropPathKeys(meta.noteKinds, path),
+    pageSetup: dropPathKeys(meta.pageSetup, path),
     starred: dropPathKeys(meta.starred, path),
   };
 }
@@ -229,6 +243,41 @@ export async function setNoteLook(path: string, look: NoteLook): Promise<void> {
     const meta = await readMeta();
     if (look !== "plain") meta.noteLooks[path] = look;
     else delete meta.noteLooks[path];
+    await writeMeta(meta);
+  });
+}
+
+/** Reads which view/editor the note at `path` opens with, or "default" if unset. Prefer
+ * reading `NoteEntry.kind` off the tree when one is already in scope - this standalone lookup
+ * exists for callers (e.g. hostSession.ts) that only have a bare path. */
+export async function getNoteKind(path: string): Promise<NoteKind> {
+  const meta = await readMeta();
+  return (meta.noteKinds[path] as NoteKind | undefined) ?? "default";
+}
+
+/** Sets (or clears, when `kind` is "default") the kind for the note at `path`. */
+export async function setNoteKind(path: string, kind: NoteKind): Promise<void> {
+  return withMetaLock(async () => {
+    const meta = await readMeta();
+    if (kind !== "default") meta.noteKinds[path] = kind;
+    else delete meta.noteKinds[path];
+    await writeMeta(meta);
+  });
+}
+
+export const DEFAULT_PAGE_SETUP: PageSetup = { size: "a4", orientation: "portrait", marginMm: 14 };
+
+/** Reads a Fixed-Size note's page dimensions/margins, or DEFAULT_PAGE_SETUP if unset. */
+export async function getPageSetup(path: string): Promise<PageSetup> {
+  const meta = await readMeta();
+  return meta.pageSetup[path] ?? DEFAULT_PAGE_SETUP;
+}
+
+/** Sets the page dimensions/margins for the Fixed-Size note at `path`. */
+export async function setPageSetup(path: string, setup: PageSetup): Promise<void> {
+  return withMetaLock(async () => {
+    const meta = await readMeta();
+    meta.pageSetup[path] = setup;
     await writeMeta(meta);
   });
 }
@@ -270,19 +319,26 @@ function joinPath(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name;
 }
 
+/** Sidecar path for a note given an extension, e.g. ("Work/Todo.md", ".sketch.json") ->
+ * "Work/Todo.sketch.json" - shared by every per-note sidecar (sketch/study/collab today,
+ * future per-kind sidecars later). */
+function sidecarPathFor(notePath: string, extension: string): string {
+  return notePath.slice(0, -NOTE_EXTENSION.length) + extension;
+}
+
 /** Sidecar ink path for a note, e.g. "Work/Todo.md" -> "Work/Todo.sketch.json" */
 function sketchPathFor(notePath: string): string {
-  return notePath.slice(0, -NOTE_EXTENSION.length) + SKETCH_EXTENSION;
+  return sidecarPathFor(notePath, SKETCH_EXTENSION);
 }
 
 /** Sidecar study-items path for a note, e.g. "Work/Todo.md" -> "Work/Todo.study.json" */
 function studyPathFor(notePath: string): string {
-  return notePath.slice(0, -NOTE_EXTENSION.length) + STUDY_EXTENSION;
+  return sidecarPathFor(notePath, STUDY_EXTENSION);
 }
 
 /** Sidecar sharing/permissions path for a note, e.g. "Work/Todo.md" -> "Work/Todo.collab.json" */
 function collabPathFor(notePath: string): string {
-  return notePath.slice(0, -NOTE_EXTENSION.length) + COLLAB_EXTENSION;
+  return sidecarPathFor(notePath, COLLAB_EXTENSION);
 }
 
 /**
@@ -374,6 +430,7 @@ async function buildTree(relDir: string, meta: NotesMeta): Promise<TreeEntry[]> 
         modifiedAt,
         starred: meta.starred[relPath],
         hasStudyItems: siblingNames.has(studySiblingName),
+        kind: (meta.noteKinds[relPath] as NoteKind | undefined) ?? "default",
       };
       return note;
     }),
@@ -405,6 +462,7 @@ export function flattenNotes(tree: TreeEntry[]): NoteSummary[] {
         modifiedAt: entry.modifiedAt,
         starred: entry.starred,
         hasStudyItems: entry.hasStudyItems,
+        kind: entry.kind,
       });
     } else {
       notes.push(...flattenNotes(entry.children));
@@ -656,6 +714,7 @@ export async function createNote(
   desiredTitle?: string,
   content: string = STARTER_CONTENT,
   look: NoteLook = "plain",
+  kind: NoteKind = "default",
 ): Promise<NoteSummary> {
   return withMetaLock(async () => {
     const title = await uniqueNoteTitle(desiredTitle?.trim() || "Untitled");
@@ -665,9 +724,10 @@ export async function createNote(
     const meta = await readMeta();
     meta.createdAt[relPath] = Date.now();
     if (look !== "plain") meta.noteLooks[relPath] = look;
+    if (kind !== "default") meta.noteKinds[relPath] = kind;
     await writeMeta(meta);
 
-    return { path: relPath, title, parentPath };
+    return { path: relPath, title, parentPath, kind };
   });
 }
 
@@ -768,17 +828,24 @@ export async function moveEntry(path: string, targetParentPath: string): Promise
   });
 }
 
-/** Moves a note's ink sidecar (if any) alongside a rename/move of the note itself. */
-async function relocateSketch(oldNotePath: string, newNotePath: string): Promise<void> {
-  const oldSketchPath = fullPath(sketchPathFor(oldNotePath));
-  const sketchExists = await exists(oldSketchPath, { baseDir: BASE_DIR });
-  if (!sketchExists) return;
-  const newSketchPath = sketchPathFor(newNotePath);
-  await mkdir(fullPath(parentOf(newSketchPath)), { baseDir: BASE_DIR, recursive: true });
-  await rename(oldSketchPath, fullPath(newSketchPath), {
+/** Moves a note's sidecar file (if any, at `extension`) alongside a rename/move of the note
+ * itself - shared by relocateSketch/relocateStudyItems/relocateCollab below, and the pattern
+ * any future per-kind sidecar (e.g. a future ".whiteboard.json") should reuse rather than
+ * hand-rolling its own copy of this same rename dance. */
+async function relocateSidecar(oldNotePath: string, newNotePath: string, extension: string): Promise<void> {
+  const oldSidecarPath = fullPath(sidecarPathFor(oldNotePath, extension));
+  if (!(await exists(oldSidecarPath, { baseDir: BASE_DIR }))) return;
+  const newSidecarPath = sidecarPathFor(newNotePath, extension);
+  await mkdir(fullPath(parentOf(newSidecarPath)), { baseDir: BASE_DIR, recursive: true });
+  await rename(oldSidecarPath, fullPath(newSidecarPath), {
     oldPathBaseDir: BASE_DIR,
     newPathBaseDir: BASE_DIR,
   });
+}
+
+/** Moves a note's ink sidecar (if any) alongside a rename/move of the note itself. */
+function relocateSketch(oldNotePath: string, newNotePath: string): Promise<void> {
+  return relocateSidecar(oldNotePath, newNotePath, SKETCH_EXTENSION);
 }
 
 /** Reads a note's ink strokes, or null if it has none. */
@@ -841,16 +908,8 @@ export async function deleteStudyItems(notePath: string): Promise<void> {
 }
 
 /** Moves a note's study-items sidecar (if any) alongside a rename/move of the note itself. */
-async function relocateStudyItems(oldNotePath: string, newNotePath: string): Promise<void> {
-  const oldStudyPath = fullPath(studyPathFor(oldNotePath));
-  const studyExists = await exists(oldStudyPath, { baseDir: BASE_DIR });
-  if (!studyExists) return;
-  const newStudyPath = studyPathFor(newNotePath);
-  await mkdir(fullPath(parentOf(newStudyPath)), { baseDir: BASE_DIR, recursive: true });
-  await rename(oldStudyPath, fullPath(newStudyPath), {
-    oldPathBaseDir: BASE_DIR,
-    newPathBaseDir: BASE_DIR,
-  });
+function relocateStudyItems(oldNotePath: string, newNotePath: string): Promise<void> {
+  return relocateSidecar(oldNotePath, newNotePath, STUDY_EXTENSION);
 }
 
 /** Reads a note's sharing/permissions state, or null if it has never been shared - see
@@ -884,16 +943,8 @@ export async function deleteCollabAcl(notePath: string): Promise<void> {
 }
 
 /** Moves a note's sharing sidecar (if any) alongside a rename/move of the note itself. */
-async function relocateCollab(oldNotePath: string, newNotePath: string): Promise<void> {
-  const oldCollabPath = fullPath(collabPathFor(oldNotePath));
-  const collabExists = await exists(oldCollabPath, { baseDir: BASE_DIR });
-  if (!collabExists) return;
-  const newCollabPath = collabPathFor(newNotePath);
-  await mkdir(fullPath(parentOf(newCollabPath)), { baseDir: BASE_DIR, recursive: true });
-  await rename(oldCollabPath, fullPath(newCollabPath), {
-    oldPathBaseDir: BASE_DIR,
-    newPathBaseDir: BASE_DIR,
-  });
+function relocateCollab(oldNotePath: string, newNotePath: string): Promise<void> {
+  return relocateSidecar(oldNotePath, newNotePath, COLLAB_EXTENSION);
 }
 
 /**

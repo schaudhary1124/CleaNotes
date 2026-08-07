@@ -5,9 +5,10 @@ import type { AssetStore } from "./assetStore";
 import { createAssetChannel } from "./assetSync";
 import { fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
+import { attachSharedTypesForKind, type KindSharedTypes } from "./kindSharedTypes";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
-import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, FRAGMENT_NAME, type SessionCtrlMessage, signedText } from "./sessionProtocol";
-import type { CollabRole, FeatureFlags, SketchStroke } from "../types";
+import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText } from "./sessionProtocol";
+import type { CollabRole, FeatureFlags, NoteKind } from "../types";
 import { DEFAULT_FEATURES } from "../utils/settings";
 
 /** Turns the wire message's plain string-keyed record back into a real FeatureFlags, filling
@@ -41,9 +42,13 @@ const SESSION_JOIN_TIMEOUT_MS = 20_000;
 export class SessionDeniedError extends Error {}
 
 export interface JoinedSession {
-  /** Already hydrated with the note's current content by the time this resolves - see the
-   * join sequencing below. */
-  yXmlFragment: Y.XmlFragment;
+  /** Which view/editor this note opens with, as told to us by the owner's "welcome" message
+   * (see sessionProtocol.ts) - determines which shared type(s) `shared` exposes. */
+  kind: NoteKind;
+  /** This note's kind-appropriate Yjs shared type(s) - already hydrated with the note's current
+   * content by the time this resolves (see the join sequencing below). See
+   * HostedSession.shared's own comment in hostSession.ts for the host-side counterpart. */
+  shared: KindSharedTypes;
   /** The owner's real, filename-derived title, sent once this device is verified as an approved
    * collaborator (see SessionCtrlMessage's "welcome" comment) - not guessed from document
    * content, which previously produced wrong results for notes that don't open with a distinct
@@ -56,9 +61,6 @@ export interface JoinedSession {
   /** Live cursors/selections and presence - see HostedSession.awareness's own comment in
    * hostSession.ts; same "single source of truth for the UI" role on this side too. */
   awareness: Awareness;
-  /** Live ink strokes for Sketch mode - see HostedSession.ySketchStrokes's own comment
-   * (hostSession.ts) for why this needs no wire protocol of its own. */
-  ySketchStrokes: Y.Array<SketchStroke>;
   /** Resolves an image node's `src` to its bytes - this device's local asset store first, then
    * the owner if that misses. See HostedSession.resolveAsset's own comment. */
   resolveAsset(key: string): Promise<Uint8Array>;
@@ -70,7 +72,7 @@ export interface JoinedSession {
   /** Identifies which hostSession() call this session's content currently reflects - see
    * sessionProtocol.ts's "welcome".generation. Changes on a resync (see onResynced below) even
    * though the outer connection never actually dropped from this device's perspective. Callers
-   * that bind an editor directly to yXmlFragment/awareness (Editor.tsx/BrowserEditor.tsx) should
+   * that bind an editor directly to shared/awareness (Editor.tsx/BrowserEditor.tsx) should
    * key that editor's mount on this value, so a resync gets a genuinely fresh editor bound to
    * the fresh fields instead of an already-mounted one going stale. */
   generation: string;
@@ -87,7 +89,7 @@ export interface JoinSessionEvents {
   /** The owner's device restarted hosting this note (a fresh, independently-seeded Y.Doc - see
    * hostSession.ts) while this connection never actually dropped from this device's
    * perspective - most commonly the note's sharing/ACL state changing, or the owner's app
-   * restarting. A brand new JoinedSession (fresh yXmlFragment/awareness/generation) is handed
+   * restarting. A brand new JoinedSession (fresh shared/awareness/generation) is handed
    * over rather than the existing one being mutated in place: see JoinedSession.generation's own
    * comment for why the old local Y.Doc is discarded outright, never merged into. Callers must
    * switch to the new session's fields (and remount whatever editor is bound to them) rather
@@ -116,8 +118,12 @@ export function joinSession(
     // welcome arrives. See JoinedSession.generation's own comment.
     let currentGeneration: string | null = null;
     let ydoc = new Y.Doc();
-    let yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
-    let ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
+    // Not resolved until the owner's "welcome" tells us this note's kind (see
+    // sessionProtocol.ts) - Yjs shared types are looked up lazily by name, so there's no need
+    // to guess a shape before then; nothing reads/writes through `shared` before the welcome
+    // handler below sets it. `ydoc`/`awareness` themselves don't depend on kind and stay eager,
+    // same as before, since room.onPeerJoin below needs `awareness` to exist immediately.
+    let shared: KindSharedTypes | null = null;
     let awareness = new Awareness(ydoc);
     // NOT setLocalStateField'd yet - see the matching comment in hostSession.ts for why this
     // waits until the relay listener below actually exists.
@@ -240,8 +246,8 @@ export function joinSession(
 
         function buildSession(title: string, features: Record<string, boolean>): JoinedSession {
           return {
-            yXmlFragment,
-            ySketchStrokes,
+            kind: shared!.kind,
+            shared: shared!,
             resolveAsset,
             title,
             features: toFeatureFlags(features),
@@ -286,10 +292,14 @@ export function joinSession(
               // is discarded outright, never merged into.
               teardownLocalDoc();
               ydoc = new Y.Doc();
-              yXmlFragment = ydoc.getXmlFragment(FRAGMENT_NAME);
-              ySketchStrokes = ydoc.getArray<SketchStroke>("sketch");
               awareness = new Awareness(ydoc);
+              shared = attachSharedTypesForKind(ydoc, message.kind as NoteKind);
               wireLocalDoc();
+            } else {
+              // First connect: `ydoc`/`awareness` were already created eagerly (see their
+              // declaration above), but the specific shared type(s) to resolve off `ydoc`
+              // weren't knowable until now - see `shared`'s own declaration comment.
+              shared = attachSharedTypesForKind(ydoc, message.kind as NoteKind);
             }
             Y.applyUpdateV2(ydoc, snapshot, "remote");
             currentGeneration = message.generation;

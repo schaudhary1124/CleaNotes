@@ -9,7 +9,9 @@ import {
   GraduationCap,
   KeyRound,
   Mic,
+  Minus,
   Pin,
+  Plus,
   RefreshCw,
   RotateCcw,
   Brush,
@@ -20,6 +22,7 @@ import type { AppUpdaterState } from "../hooks/useAppUpdater";
 import { listSharedNotes, revokeCollaborator, type SharedNoteSummary } from "../collab/acl";
 import { loadOrCreateIdentity } from "../collab/identity";
 import { formatRelativeTime } from "../utils/relativeTime";
+import { clampVoiceCountdown, VOICE_COUNTDOWN_MAX, VOICE_COUNTDOWN_MIN } from "../utils/settings";
 import { Switch } from "./Switch";
 
 interface SettingsPanelProps {
@@ -123,6 +126,10 @@ export function SettingsPanel({
     onChange({ ...settings, features: { ...settings.features, [key]: !settings.features[key] } });
   }
 
+  function setVoiceCountdown(seconds: number) {
+    onChange({ ...settings, voiceNoteCountdown: clampVoiceCountdown(seconds) });
+  }
+
   // The button drives whatever action the current phase calls for, rather than only ever
   // re-checking - so the user explicitly opts in to each step (download, then restart).
   const updateButton = (() => {
@@ -219,6 +226,40 @@ export function SettingsPanel({
                     <p className="text-primary text-sm font-medium">{feature.label}</p>
                     <p className="text-tertiary text-xs">{feature.description}</p>
                   </div>
+                  {/* Voice Notes carries one extra setting - the recording countdown - inline in
+                      its own row rather than in a section of its own: it's a single number that
+                      only means anything while the feature is on, so it belongs next to the
+                      switch that turns it on. Hidden entirely when off, for the same reason. */}
+                  {feature.key === "voiceNotes" && settings.features.voiceNotes && (
+                    <div className="border-subtle flex shrink-0 items-center gap-0.5 rounded-lg border p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setVoiceCountdown(settings.voiceNoteCountdown - 1)}
+                        disabled={settings.voiceNoteCountdown <= VOICE_COUNTDOWN_MIN}
+                        title="Shorter countdown before recording starts"
+                        aria-label="Shorter countdown before recording starts"
+                        className="btn-ghost flex h-6 w-6 items-center justify-center rounded-md disabled:opacity-30"
+                      >
+                        <Minus size={12} />
+                      </button>
+                      <span
+                        title="Countdown before recording starts"
+                        className="text-primary w-8 text-center text-xs font-medium tabular-nums"
+                      >
+                        {settings.voiceNoteCountdown === 0 ? "Off" : `${settings.voiceNoteCountdown}s`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setVoiceCountdown(settings.voiceNoteCountdown + 1)}
+                        disabled={settings.voiceNoteCountdown >= VOICE_COUNTDOWN_MAX}
+                        title="Longer countdown before recording starts"
+                        aria-label="Longer countdown before recording starts"
+                        className="btn-ghost flex h-6 w-6 items-center justify-center rounded-md disabled:opacity-30"
+                      >
+                        <Plus size={12} />
+                      </button>
+                    </div>
+                  )}
                   <Switch
                     checked={settings.features[feature.key]}
                     onChange={() => toggleFeature(feature.key)}

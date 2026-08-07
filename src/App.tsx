@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { Home } from "./components/Home";
-import { Editor } from "./components/Editor";
 import { StudyView } from "./components/StudyView";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -66,6 +65,8 @@ import {
   updateGuestNoteStatus,
 } from "./collab/sharedNotesStore";
 import type { NoteLinkTarget } from "./milkdown/noteLinkHref";
+import { NOTE_KINDS } from "./noteKinds/kinds";
+import { NOTE_KIND_EDIT_VIEWS } from "./noteKinds/registry";
 import { loadMainTabSession, saveMainTabSession } from "./utils/tabSession";
 import {
   addNoteToIndex,
@@ -227,10 +228,17 @@ function App() {
   // Bumped to force the Editor to remount (and pick up fresh initialContent) when another
   // window's save is applied here, since Milkdown only reads its initial value on mount.
   const [reloadToken, setReloadToken] = useState(0);
+  const activeNote = useMemo(
+    () => flattenNotes(tree).find((n) => n.path === activeNotePath) ?? null,
+    [tree, activeNotePath],
+  );
   const activeMode = activeNotePath ? tabModes[activeNotePath] ?? "edit" : "edit";
-  // Falls back to edit mode without touching tabModes, so a tab that was in Study before the
-  // feature got disabled just quietly resumes in Study if it's re-enabled later.
-  const effectiveMode = settings.features.studyMode ? activeMode : "edit";
+  // Study mode only applies to kinds with prose content to quiz on (see NOTE_KINDS) - falls back
+  // to edit mode without touching tabModes either way, so a tab that was in Study before the
+  // feature got disabled (or the note isn't a study-capable kind) just quietly resumes in Study
+  // if it's re-enabled/the note changes later.
+  const activeKindSupportsStudyMode = NOTE_KINDS[activeNote?.kind ?? "default"].supportsStudyMode;
+  const effectiveMode = settings.features.studyMode && activeKindSupportsStudyMode ? activeMode : "edit";
   const effectiveSketchMode = settings.features.sketch && sketchMode;
 
   useEffect(() => {
@@ -724,7 +732,7 @@ function App() {
       await flushActiveNote();
       const template = getTemplate(templateId);
       const content = template.buildContent();
-      const note = await createNote(parentPath, title, content, template.look);
+      const note = await createNote(parentPath, title, content, template.look, template.kind);
       await refreshTree();
       addNoteToIndex(note.path, content);
       addNoteToBacklinksIndex(note.path, content);
@@ -910,11 +918,6 @@ function App() {
     }
     setConfirmAction(null);
   }
-
-  const activeNote = useMemo(
-    () => flattenNotes(tree).find((n) => n.path === activeNotePath) ?? null,
-    [tree, activeNotePath],
-  );
 
   // Every note in the vault, for the editor's "link to a note" picker - not just the active one.
   const allNotes = useMemo(() => flattenNotes(tree), [tree]);
@@ -1516,7 +1519,7 @@ function App() {
           onToggleToolbar={handleToggleToolbar}
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebarCollapse={handleToggleSidebarCollapse}
-          studyModeFeatureEnabled={settings.features.studyMode}
+          studyModeFeatureEnabled={settings.features.studyMode && activeKindSupportsStudyMode}
           keepOnTopFeatureEnabled={settings.features.keepOnTop}
           alwaysOnTop={settings.alwaysOnTop}
           onToggleAlwaysOnTop={handleToggleAlwaysOnTop}
@@ -1629,52 +1632,40 @@ function App() {
                   />
                 )}
 
-                {bootStatus === "ready" && view === "note" && activeNote && effectiveMode === "edit" && (
-                  <Editor
-                    key={`${activeNote.path}:${reloadToken}:${settings.features.voiceNotes}:${activeCollabSession ? "collab" : "solo"}`}
-                    notePath={activeNote.path}
-                    initialContent={activeContent}
-                    onChange={(value) => {
-                      // Not setActiveContent: that's a useState setter, and calling it on every
-                      // keystroke re-renders all of App (including Sidebar/Header) for no
-                      // rendering purpose - activeContent's only JSX use is initialContent above,
-                      // which just seeds a freshly-keyed Editor mount. Every "read the live
-                      // value" consumer already goes through activeContentRef, so updating it
-                      // directly here keeps them correct without the unnecessary re-render.
-                      activeContentRef.current = value;
-                    }}
-                    onSave={async (content) => {
-                      await writeNote(activeNote.path, content);
-                      savedContentRef.current = content;
-                      updateNoteInIndex(activeNote.path, content);
-                      updateNoteInBacklinksIndex(activeNote.path, content);
-                      await broadcastNoteSaved(activeNote.path, content);
-                    }}
-                    toolbarVisible={toolbarVisible}
-                    sketchMode={effectiveSketchMode}
-                    onToggleSketchMode={() => setSketchMode((v) => !v)}
-                    sketchEnabled={settings.features.sketch}
-                    codeBlockEnabled={settings.features.codeBlock}
-                    voiceNotesEnabled={settings.features.voiceNotes}
-                    noteChoices={allNotes}
-                    onNavigateToNoteLink={handleNavigateToNoteLink}
-                    scrollToAnchorId={
-                      pendingScrollAnchor?.path === activeNote.path ? pendingScrollAnchor.anchorId : undefined
+                {bootStatus === "ready" &&
+                  view === "note" &&
+                  activeNote &&
+                  effectiveMode === "edit" &&
+                  (() => {
+                    const KindView = NOTE_KIND_EDIT_VIEWS[activeNote.kind];
+                    if (!KindView) {
+                      return (
+                        <div className="flex h-full items-center justify-center p-10 text-center">
+                          <p className="text-secondary max-w-sm text-sm">
+                            {NOTE_KINDS[activeNote.kind].label} notes aren't supported in this version yet.
+                          </p>
+                        </div>
+                      );
                     }
-                    onScrolledToAnchor={() => setPendingScrollAnchor(null)}
-                    collabSession={
-                      activeCollabSession
-                        ? {
-                            yXmlFragment: activeCollabSession.yXmlFragment,
-                            canEdit: true,
-                            awareness: activeCollabSession.awareness,
-                            ySketchStrokes: activeCollabSession.ySketchStrokes,
-                            resolveAsset: activeCollabSession.resolveAsset,
-                          }
-                        : undefined
-                    }
-                  />
-                )}
+                    return (
+                      <KindView
+                        note={activeNote}
+                        reloadToken={reloadToken}
+                        settings={settings}
+                        activeContent={activeContent}
+                        activeContentRef={activeContentRef}
+                        savedContentRef={savedContentRef}
+                        activeCollabSession={activeCollabSession}
+                        toolbarVisible={toolbarVisible}
+                        sketchMode={effectiveSketchMode}
+                        onToggleSketchMode={() => setSketchMode((v) => !v)}
+                        allNotes={allNotes}
+                        onNavigateToNoteLink={handleNavigateToNoteLink}
+                        pendingScrollAnchor={pendingScrollAnchor}
+                        onScrolledToAnchor={() => setPendingScrollAnchor(null)}
+                      />
+                    );
+                  })()}
 
                 {bootStatus === "ready" && view === "note" && activeNote && effectiveMode === "study" && (
                   <ErrorBoundary>

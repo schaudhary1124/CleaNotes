@@ -16,6 +16,11 @@ export const DEFAULT_FEATURES: FeatureFlags = {
   voiceNotes: true,
 };
 
+/** Bounds for AppSettings.voiceNoteCountdown - shared by the Settings stepper that edits it and
+ * loadSettings' sanitizing of whatever was persisted. */
+export const VOICE_COUNTDOWN_MIN = 0;
+export const VOICE_COUNTDOWN_MAX = 10;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "light",
   accent: "indigo",
@@ -24,7 +29,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sidebarCollapsed: false,
   alwaysOnTop: false,
   features: DEFAULT_FEATURES,
+  voiceNoteCountdown: 3,
 };
+
+export function clampVoiceCountdown(value: unknown): number {
+  const seconds = Math.round(Number(value));
+  if (!Number.isFinite(seconds)) return DEFAULT_SETTINGS.voiceNoteCountdown;
+  return Math.min(VOICE_COUNTDOWN_MAX, Math.max(VOICE_COUNTDOWN_MIN, seconds));
+}
 
 export function loadSettings(): AppSettings {
   try {
@@ -33,7 +45,16 @@ export function loadSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     // `features` merges one level deeper than the rest - stored settings from before this field
     // existed (or missing a flag added later) shouldn't silently disable every feature within it.
-    return { ...DEFAULT_SETTINGS, ...parsed, features: { ...DEFAULT_FEATURES, ...parsed.features } };
+    const merged: AppSettings = {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      features: { ...DEFAULT_FEATURES, ...parsed.features },
+    };
+    // Re-clamped rather than trusted: this one is a number a hand-edited (or older, differently-
+    // bounded) stored value could put out of range, and a negative/absurd countdown would stall
+    // the recorder popover before it ever reached the microphone.
+    merged.voiceNoteCountdown = clampVoiceCountdown(merged.voiceNoteCountdown);
+    return merged;
   } catch {
     return DEFAULT_SETTINGS;
   }

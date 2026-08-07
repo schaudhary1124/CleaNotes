@@ -9,16 +9,20 @@ import {
   ListChecks,
   ListOrdered,
   Minus as DividerIcon,
+  Printer,
   RemoveFormatting,
   Strikethrough,
   Underline,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { callCommand } from "@milkdown/kit/utils";
-import { createCodeBlockCommand, insertHrCommand, toggleEmphasisCommand, toggleStrongCommand, wrapInHeadingCommand } from "@milkdown/kit/preset/commonmark";
+import { createCodeBlockCommand, insertHrCommand, toggleEmphasisCommand, toggleStrongCommand } from "@milkdown/kit/preset/commonmark";
 import { ToolbarButtonGroup, type ToolbarAction } from "../components/ToolbarButtonGroup";
 import { ALIGN_OPTIONS, TableMenu } from "../components/TableMenu";
 import { LookDropdown } from "../components/LookDropdown";
+import { PageSetupDropdown } from "../components/PageSetupDropdown";
 import { TextStyleDropdown } from "../components/TextStyleDropdown";
 import { setBlockAlign, setTableColumnAlign } from "../milkdown/alignmentCommands";
 import {
@@ -29,10 +33,10 @@ import {
   toggleTextDecoration,
   underlineSchema,
 } from "../milkdown/textDecorationMarks";
-import { clearFormatting } from "../milkdown/formatCommands";
+import { clearFormatting, setBlockStyle } from "../milkdown/formatCommands";
 import { liftOutOfList, toggleBulletList, toggleOrderedList, toggleTaskItem } from "../milkdown/listCommands";
 import { addTableColumn, addTableRow, deleteCurrentTable, deleteTableColumn, deleteTableRow, insertTable, setTableCellBackground } from "../milkdown/tableCommands";
-import type { NoteLook } from "../types";
+import type { NoteLook, PageSetup } from "../types";
 import type { BrowserSelectionState } from "./browserSelectionState";
 
 interface BrowserToolbarProps {
@@ -46,6 +50,15 @@ interface BrowserToolbarProps {
   /** Hidden entirely (not just disabled) for a viewer, matching onInsertImage's own affordance -
    * see BrowserEditor.tsx, which only renders this whole toolbar at all when canEdit. */
   onToggleSketchMode: () => void;
+  /** Fixed-Size (kind === "fixed-size") support - see Editor.tsx's identical `paginated` prop
+   * for why this stays a plain prop rather than a global feature flag. */
+  paginated: boolean;
+  pageSetup: PageSetup;
+  onChangePageSetup: (next: PageSetup) => void;
+  onPrint: () => void;
+  zoom: number;
+  onZoomOut: () => void;
+  onZoomIn: () => void;
 }
 
 /** The browser-guest build's formatting toolbar - structurally the same subset of
@@ -63,6 +76,13 @@ export function BrowserToolbar({
   onInsertImage,
   uploadError,
   onToggleSketchMode,
+  paginated,
+  pageSetup,
+  onChangePageSetup,
+  onPrint,
+  zoom,
+  onZoomOut,
+  onZoomIn,
 }: BrowserToolbarProps) {
   const emphasisGroup: ToolbarAction[] = [
     { icon: Bold, label: "Bold", action: () => run((ctx) => callCommand(toggleStrongCommand.key)(ctx)), isActive: selectionState.bold },
@@ -130,7 +150,7 @@ export function BrowserToolbar({
         onSelect={(style) =>
           run((ctx) => {
             liftOutOfList(ctx);
-            callCommand(wrapInHeadingCommand.key, style === "paragraph" ? 0 : style)(ctx);
+            setBlockStyle(ctx, style);
           })
         }
       />
@@ -190,6 +210,42 @@ export function BrowserToolbar({
         </button>
       )}
       <div className="divider mx-1 h-5 w-px shrink-0" />
+      {paginated && (
+        <>
+          <PageSetupDropdown setup={pageSetup} onChange={onChangePageSetup} />
+          <button
+            type="button"
+            onClick={onPrint}
+            title="Print / export as PDF"
+            aria-label="Print / export as PDF"
+            className="btn-ghost h-7 w-7 shrink-0"
+          >
+            <Printer size={14} />
+          </button>
+          <div className="divider mx-1 h-5 w-px shrink-0" />
+          <button
+            type="button"
+            onClick={onZoomOut}
+            disabled={zoom <= 0.5}
+            title="Zoom out"
+            aria-label="Zoom out"
+            className="btn-ghost h-7 w-7 shrink-0 disabled:opacity-40"
+          >
+            <ZoomOut size={14} />
+          </button>
+          <span className="text-secondary w-10 shrink-0 text-center text-xs tabular-nums">{Math.round(zoom * 100)}%</span>
+          <button
+            type="button"
+            onClick={onZoomIn}
+            disabled={zoom >= 2}
+            title="Zoom in"
+            aria-label="Zoom in"
+            className="btn-ghost h-7 w-7 shrink-0 disabled:opacity-40"
+          >
+            <ZoomIn size={14} />
+          </button>
+        </>
+      )}
       <LookDropdown look={look} onSelect={onSelectLook} />
       {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}
     </div>

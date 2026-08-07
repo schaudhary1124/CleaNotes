@@ -30,11 +30,15 @@ import type { SketchStroke } from "../types";
 import { taskListToggle } from "./taskListToggle";
 import { configureVoiceNoteSchemas, voiceSidecarRemark } from "./voiceNoteSchemaExtensions";
 import { voiceNoteGrips } from "./voiceNoteGrips";
+import { voiceNoteInlinePlugins } from "./voiceNoteInline";
+import { voiceNoteInlineView } from "./voiceNoteInlineView";
 import { noteLinkClickPlugin } from "./noteLinkClick";
 import type { NoteLinkTarget } from "./noteLinkHref";
 import { noteLinkTriggerPlugin, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "./noteLinkTrigger";
 import { notePinPlugins } from "./notePin";
 import { notePinView } from "./notePinView";
+import { pageBreakPlugins } from "./pageBreak";
+import { paginationLayout, type ComputedPageRect, type PaginationMetrics } from "./paginationLayout";
 import { noteLinkChipPlugins } from "./noteLinkChip";
 import { noteLinkChipView } from "./noteLinkChipView";
 import type { RefObject } from "react";
@@ -133,11 +137,11 @@ export function registerMilkdownPlugins(
   onNoteLinkTriggerChange?: (info: NoteLinkTriggerInfo | null) => void,
   noteLinkResultsRef?: RefObject<NoteLinkTriggerChoice[]>,
   onSelectionRangeChanged?: (range: EditorSelectionRange | null) => void,
-  // Whether the add-voice-note affordance should be included - see voiceNoteGrips.ts for what
-  // this gates. Fixed at editor construction (like every other plugin here), so toggling it
-  // requires remounting the Editor - see App.tsx's Editor `key`.
-  voiceNotesEnabled: boolean = true,
   collabSession?: CollabPluginConfig,
+  // Fixed-Size notes only - see paginationLayout.ts. `metricsRef` is a live-updated ref (not a
+  // value baked in at construction) since PageSetup can change at runtime without remounting
+  // the editor - see that file's own comment.
+  pagination?: { metricsRef: { current: PaginationMetrics }; onLayoutChanged: (pages: ComputedPageRect[]) => void },
 ) {
   function reportSelectionState(ctx: Ctx) {
     if (!onSelectionStateChanged) return;
@@ -277,16 +281,31 @@ export function registerMilkdownPlugins(
     .use(cursor)
     .use(imageView({ store: fsAssetStore, fetchRemote: collabSession?.resolveAsset }))
     .use(taskListToggle)
-    // The margin "add voice note"/pill affordance and its recording handling - see
-    // voiceNoteGrips.ts. Needs `notePath` (for writeAttachment when a recording is saved), which
-    // none of the other plugins here require - same reasoning imageCommands.ts's insertImageFile
-    // in Editor.tsx already closes over `notePath` for the same call.
-    .use(voiceNoteGrips(notePath, voiceNotesEnabled))
+    // The legacy per-line margin pill affordance and its playback/remove/append handling - see
+    // voiceNoteGrips.ts. `false` disables only its own "hover an empty line to add" affordance
+    // (an existing recording's pill stays fully functional regardless - see that file's own
+    // comment): voiceNoteInlineView below is now the sole way to *create* a new voice note, but
+    // notes with voice notes already recorded the old way must keep playing/removing/appending
+    // exactly as before.
+    .use(voiceNoteGrips(notePath, false))
     // The `notePin` atom node ("Copy link to this point" in the selection toolbar - see
     // notePin.ts/notePinView.ts) and its markdown round-trip. Same ordering requirement as the
     // other sidecar remarks: must come after commonmark/gfm above.
     .use(notePinPlugins)
     .use(notePinView)
+    // The `voiceNoteInline` atom node (voice notes attached at the cursor via the toolbar's mic
+    // button - see voiceNoteInline.ts/voiceNoteInlineView.ts) and its markdown round-trip. Same
+    // ordering requirement as notePinPlugins. Needs `notePath` for writeAttachment when a
+    // recording is saved, same reasoning as voiceNoteGrips above.
+    .use(voiceNoteInlinePlugins)
+    .use(voiceNoteInlineView(notePath))
+    // The `pageBreak` atom node (Fixed-Size notes' manual "force a new page here" marker - see
+    // pageBreak.ts) and its markdown round-trip. Same ordering requirement as notePinPlugins.
+    // Registered unconditionally (see pageBreak.ts's own comment) - not gated on note kind.
+    .use(pageBreakPlugins)
+    // The live pagination measurement engine (see paginationLayout.ts) - only for Fixed-Size
+    // notes, since it's real per-keystroke measurement cost a Default note shouldn't pay.
+    .use(pagination ? paginationLayout(pagination.metricsRef, pagination.onLayoutChanged) : [])
     // The `noteLinkChip` atom (a pasted-with-no-selection note:// link, standing in for a `link`
     // mark - see noteLinkChip.ts/noteLinkChipView.ts). Same ordering requirement as notePinPlugins.
     .use(noteLinkChipPlugins)

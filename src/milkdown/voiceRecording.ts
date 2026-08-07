@@ -171,13 +171,18 @@ export function formatDuration(ms: number): string {
 }
 
 /** One in-progress microphone recording. `getUserMedia`+`MediaRecorder.start()` fire immediately
- * from `start()` - the margin UI's mic click is meant to start recording right away (see
- * voiceNoteGrips.ts), not arm a second confirmation step. */
+ * from `start()` - any "get ready" delay before that happens is the caller's business (see
+ * VoiceRecorderPopover.tsx's countdown, which simply doesn't call this until it elapses), so the
+ * microphone is never held open while nothing is being captured. */
 export class VoiceRecording {
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
   private chunks: BlobPart[] = [];
   private startedAt = 0;
+  /** `Date.now()` of the current pause, or 0 while running - see elapsedMs. */
+  private pausedAt = 0;
+  /** Total time spent paused across all previous pause/resume cycles. */
+  private pausedTotalMs = 0;
   private stopped: Promise<Blob> | null = null;
   private resolveStopped: ((blob: Blob) => void) | null = null;
   private rejectStopped: ((err: unknown) => void) | null = null;
@@ -223,11 +228,34 @@ export class VoiceRecording {
     return recording;
   }
 
-  /** Wall-clock elapsed time for a *live* in-progress timer readout - the final persisted
-   * duration (see stop()) instead comes from the decoded clip's own length, which can differ
-   * slightly from wall-clock time due to encoding lag. */
+  /** Wall-clock elapsed time for a *live* in-progress timer readout, excluding time spent paused
+   * (a paused MediaRecorder captures nothing, so counting it would make the timer run ahead of
+   * the audio it claims to describe) - the final persisted duration (see stop()) instead comes
+   * from the decoded clip's own length, which can differ slightly from wall-clock time due to
+   * encoding lag. */
   elapsedMs(): number {
-    return Date.now() - this.startedAt;
+    const currentPause = this.pausedAt > 0 ? Date.now() - this.pausedAt : 0;
+    return Math.max(0, Date.now() - this.startedAt - this.pausedTotalMs - currentPause);
+  }
+
+  isPaused(): boolean {
+    return this.recorder?.state === "paused";
+  }
+
+  /** Suspends capture without ending the recording - the mic stays open and `resume()` continues
+   * into the *same* clip (MediaRecorder's own pause/resume, so the paused span simply isn't
+   * present in the output rather than being stitched out afterwards). No-op if not recording. */
+  pause() {
+    if (this.recorder?.state !== "recording") return;
+    this.recorder.pause();
+    this.pausedAt = Date.now();
+  }
+
+  resume() {
+    if (this.recorder?.state !== "paused") return;
+    this.recorder.resume();
+    if (this.pausedAt > 0) this.pausedTotalMs += Date.now() - this.pausedAt;
+    this.pausedAt = 0;
   }
 
   private releaseStream() {
@@ -239,9 +267,14 @@ export class VoiceRecording {
    * `writeAttachment`/node attrs. */
   async stop(): Promise<{ wav: Uint8Array; durationMs: number }> {
     if (!this.recorder || !this.stopped) throw new Error("Recording was never started");
+    // Calling stop() on a *paused* recorder is fine (it flushes and ends the same as from
+    // "recording"), so stopping straight out of a pause needs no resume-first dance.
     this.recorder.stop();
     const blob = await this.stopped;
     this.releaseStream();
+    // Guard the decode below: a recording stopped before the encoder emitted anything yields a
+    // zero-byte blob, which decodeAudioData rejects with an opaque EncodingError.
+    if (blob.size === 0) throw new Error("Nothing was recorded");
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const decoded = await decodeToAudioBuffer(bytes);
     return { wav: encodeWav(decoded), durationMs: Math.round(decoded.duration * 1000) };

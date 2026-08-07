@@ -1,6 +1,6 @@
-import { BookOpen, CalendarCheck, FileText, Target, Users } from "lucide-react";
+import { BookOpen, CalendarCheck, FileStack, FileText, Target, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { NoteLook } from "../types";
+import type { NoteKind, NoteLook } from "../types";
 import { STARTER_CONTENT } from "./fsNotes";
 
 export interface NoteTemplate {
@@ -8,7 +8,10 @@ export interface NoteTemplate {
   label: string;
   description: string;
   icon: LucideIcon;
-  /** Suggested default look for notes created from this template - the user can change it later. */
+  /** Which view/editor a note created from this template opens with - see NoteKind. */
+  kind: NoteKind;
+  /** Suggested default look for notes created from this template - the user can change it later.
+   * Only meaningful for Milkdown-backed kinds (default/fixed-size). */
   look: NoteLook;
   buildContent(): string;
 }
@@ -23,6 +26,7 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     label: "Blank",
     description: "Start with an empty note",
     icon: FileText,
+    kind: "default",
     look: "plain",
     buildContent: () => STARTER_CONTENT,
   },
@@ -31,6 +35,7 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     label: "Lecture notes",
     description: "Topic, key points, and a summary",
     icon: BookOpen,
+    kind: "default",
     look: "paper",
     buildContent: () => `## Topic\n\n## Key points\n\n## Questions to review\n\n## Summary\n`,
   },
@@ -39,6 +44,7 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     label: "Meeting notes",
     description: "Attendees, agenda, and action items",
     icon: Users,
+    kind: "default",
     look: "plain",
     buildContent: () =>
       `## Attendees\n\n## Agenda\n\n## Discussion\n\n## Action items\n- [ ] Add action items here\n\n## Decisions\n`,
@@ -48,6 +54,7 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     label: "Project brief",
     description: "Objective, scope, and timeline",
     icon: Target,
+    kind: "default",
     look: "plain",
     buildContent: () =>
       `## Objective\n\n## Scope\n\n## Stakeholders\n\n## Timeline\n\n## Risks\n`,
@@ -57,8 +64,18 @@ export const NOTE_TEMPLATES: NoteTemplate[] = [
     label: "Daily review",
     description: "Wins, challenges, and tomorrow",
     icon: CalendarCheck,
+    kind: "default",
     look: "paper",
     buildContent: () => `## ${todayLabel()}\n\n## Wins\n\n## Challenges\n\n## Tomorrow\n`,
+  },
+  {
+    id: "fixed-size",
+    label: "Fixed-size document",
+    description: "Paginated, print-ready page layout",
+    icon: FileStack,
+    kind: "fixed-size",
+    look: "plain",
+    buildContent: () => STARTER_CONTENT,
   },
 ];
 

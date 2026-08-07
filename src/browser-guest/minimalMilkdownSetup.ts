@@ -16,6 +16,8 @@ import { codeBlockExtensions, codeBlockLanguages } from "../milkdown/codeBlock";
 import { codeBlockGrips } from "../milkdown/codeBlockGrips";
 import { imageSchemaExt, imageWrapSidecarRemark } from "../milkdown/imageSchemaExtensions";
 import { imageView } from "../milkdown/imageView";
+import { pageBreakPlugins } from "../milkdown/pageBreak";
+import { paginationLayout, type ComputedPageRect, type PaginationMetrics } from "../milkdown/paginationLayout";
 import { taskListToggle } from "../milkdown/taskListToggle";
 import { tableCellBreakRemark, tableSchemaExtensionPlugins, tableSidecarRemark } from "../milkdown/tableSchemaExtensions";
 import { tableGrips } from "../milkdown/tableGrips";
@@ -60,6 +62,8 @@ export function registerMinimalMilkdownPlugins(
   collab: MinimalCollabConfig,
   onSelectionStateChanged?: (state: BrowserSelectionState) => void,
   codeBlockEnabled: boolean = true,
+  // Fixed-Size notes only - see ../milkdown/paginationLayout.ts and setup.ts's identical param.
+  pagination?: { metricsRef: { current: PaginationMetrics }; onLayoutChanged: (pages: ComputedPageRect[]) => void },
 ) {
   const withCoreSchema = editor
     .config((ctx) => {
@@ -95,6 +99,10 @@ export function registerMinimalMilkdownPlugins(
     .use(alignmentSidecarRemark)
     .use(imageSchemaExt)
     .use(imageWrapSidecarRemark)
+    // The `pageBreak` atom node - see ../milkdown/pageBreak.ts's own comment for why this is
+    // registered unconditionally rather than gated on note kind.
+    .use(pageBreakPlugins)
+    .use(pagination ? paginationLayout(pagination.metricsRef, pagination.onLayoutChanged) : [])
     .use(textDecorationPlugins)
     .use(columnResizingPlugin)
     .use(tableGrips);

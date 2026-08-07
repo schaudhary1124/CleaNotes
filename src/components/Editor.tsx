@@ -12,18 +12,23 @@ import {
   List,
   ListChecks,
   ListOrdered,
+  Mic,
   Minus as DividerIcon,
   Pilcrow,
+  Printer,
   RemoveFormatting,
   SeparatorHorizontal,
   Strikethrough,
   Underline,
   WrapText,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
-import { Editor as MilkdownEditor, defaultValueCtx, editorViewCtx, rootCtx } from "@milkdown/kit/core";
+import { Editor as MilkdownEditor, defaultValueCtx, editorViewCtx, rootCtx, schemaCtx } from "@milkdown/kit/core";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { callCommand } from "@milkdown/kit/utils";
 import { TextSelection } from "@milkdown/kit/prose/state";
+import { Fragment, Slice } from "@milkdown/kit/prose/model";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import {
   createCodeBlockCommand,
@@ -31,12 +36,21 @@ import {
   linkSchema,
   toggleEmphasisCommand,
   toggleStrongCommand,
-  wrapInHeadingCommand,
 } from "@milkdown/kit/preset/commonmark";
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { redoCommand as yRedoCommand, undoCommand as yUndoCommand } from "y-prosemirror";
 import { useDebouncedCallback } from "../hooks/useDebouncedCallback";
-import { fsAssetStore, getNoteLook, readSketch, setNoteLook, writeSketch } from "../utils/fsNotes";
+import {
+  DEFAULT_PAGE_SETUP,
+  fsAssetStore,
+  getNoteLook,
+  getPageSetup,
+  readSketch,
+  setNoteLook,
+  setPageSetup as persistPageSetup,
+  writeSketch,
+} from "../utils/fsNotes";
+import { clampedMarginMm, mmToPx, pageDimensionsMm, verticalMarginPx } from "../utils/pageSizes";
 import { hashAssetBytes } from "../collab/assetStore";
 import { imageSchemaExt, type ImageWrap } from "../milkdown/imageSchemaExtensions";
 import type { CollabPluginConfig, EditorSelectionRange, EditorSelectionState } from "../milkdown/setup";
@@ -68,13 +82,23 @@ import {
   expandToWordBoundaries,
   resolveGestureRange,
 } from "../milkdown/sketchDecorations";
-import { clearFormatting } from "../milkdown/formatCommands";
+import { clearFormatting, setBlockStyle } from "../milkdown/formatCommands";
 import { buildNoteLinkHref, describeNoteLinkTarget, parseNoteLinkHref, type NoteLinkTarget } from "../milkdown/noteLinkHref";
 import { confirmNoteLinkTrigger, type NoteLinkTriggerChoice, type NoteLinkTriggerInfo } from "../milkdown/noteLinkTrigger";
 import { notePinSchema } from "../milkdown/notePin";
+import type { PaginationMetrics } from "../milkdown/paginationLayout";
 import { NOTE_PIN_CLICKED_EVENT, type NotePinClickedDetail } from "../milkdown/notePinView";
-import { VOICE_NOTE_CLICKED_EVENT, type VoiceNoteClickedDetail } from "../milkdown/voiceNoteGrips";
+import {
+  armAutoStartRecording,
+  VOICE_NOTE_CLICKED_EVENT,
+  VOICE_NOTE_RECORD_ABORT_EVENT,
+  VOICE_NOTE_RECORD_EVENT,
+  type VoiceNoteClickedDetail,
+  type VoiceNoteRecordDetail,
+} from "../milkdown/voiceNoteInlineView";
+import { voiceNoteInlineSchema } from "../milkdown/voiceNoteInline";
 import { VoiceNotePopover } from "./VoiceNotePopover";
+import { VoiceRecorderPopover } from "./VoiceRecorderPopover";
 import { noteLinkChipSchema } from "../milkdown/noteLinkChip";
 import { LINK_CLICKED_EVENT, openLinkHref, type LinkClickedDetail } from "../milkdown/noteLinkClick";
 import { SketchLayer } from "./SketchLayer";
@@ -85,8 +109,10 @@ import { LinkPopover, NotePinPopover, SelectionLinkToolbar } from "./SelectionLi
 import { ToolbarButtonGroup, type ToolbarAction } from "./ToolbarButtonGroup";
 import { ALIGN_OPTIONS, TableMenu } from "./TableMenu";
 import { LookDropdown } from "./LookDropdown";
+import { PageBackdrop, type PageRect } from "./PageBackdrop";
+import { PageSetupDropdown } from "./PageSetupDropdown";
 import { TextStyleDropdown } from "./TextStyleDropdown";
-import type { NoteLook, SketchStroke, SketchTool } from "../types";
+import type { NoteLook, PageSetup, SketchStroke, SketchTool } from "../types";
 import { applyStrokesToYArray, SKETCH_LOCAL_ORIGIN } from "../collab/sketchSync";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved";
@@ -104,9 +130,19 @@ interface EditorProps {
   /** Whether the Code Block feature is enabled - hides the toolbar's insert button when off.
    * Existing code blocks in the note still render/edit regardless. */
   codeBlockEnabled: boolean;
-  /** Whether the Voice Notes feature is enabled - forwarded to registerMilkdownPlugins, which
-   * needs it at construction time (see App.tsx's Editor `key`, which remounts on change). */
+  /** Whether the Voice Notes feature is enabled - hides the toolbar's mic button when off.
+   * Voice notes already recorded (old per-line style or new inline-atom style) still play/
+   * remove/append regardless - see setup.ts's voiceNoteGrips call. */
   voiceNotesEnabled: boolean;
+  /** Seconds of lead-in before a voice recording starts capturing (AppSettings.voiceNoteCountdown,
+   * edited in Settings) - see VoiceRecorderPopover. */
+  voiceNoteCountdown: number;
+  /** Whether this note is Fixed-Size (kind === "fixed-size") - turns on page-boundary guides,
+   * the manual page-break toolbar action, and the page-setup control. Default notes pass false.
+   * Unlike sketchEnabled this isn't a global feature flag but an intrinsic, permanent property
+   * of the note itself (see NoteKind) - still just a plain prop here since Editor.tsx doesn't
+   * otherwise need to know about kinds at all. */
+  paginated: boolean;
   /** Every note in the vault, for the "link to a note" picker - not just the current one. */
   noteChoices: NoteLinkChoice[];
   /** Cmd/Ctrl-clicking an internal note:// link calls this with its target. */
@@ -118,9 +154,9 @@ interface EditorProps {
    * clear its pending state instead of re-triggering on the next unrelated re-render. */
   onScrolledToAnchor?: () => void;
   /** When present, binds this editor to a live collaboration session - see
-   * src/collab/yjsBridge.ts and setup.ts's CollabPluginConfig. Fixed at construction like
-   * voiceNotesEnabled above (see App.tsx's Editor `key`, which remounts when a session
-   * starts/ends since it changes which undo plugin and editable state get registered). */
+   * src/collab/yjsBridge.ts and setup.ts's CollabPluginConfig. Fixed at construction (see
+   * App.tsx's Editor `key`, which remounts when a session starts/ends since it changes which
+   * undo plugin and editable state get registered). */
   collabSession?: CollabPluginConfig;
 }
 
@@ -304,6 +340,8 @@ function NoteEditor({
   sketchEnabled,
   codeBlockEnabled,
   voiceNotesEnabled,
+  voiceNoteCountdown,
+  paginated,
   noteChoices,
   onNavigateToNoteLink,
   scrollToAnchorId,
@@ -318,9 +356,14 @@ function NoteEditor({
   // Set by notePinView.ts's click handler (see the NOTE_PIN_CLICKED_EVENT listener below) -
   // which pin's popover (if any) is open.
   const [pinPopover, setPinPopover] = useState<NotePinClickedDetail | null>(null);
-  // Set by voiceNoteGrips.ts's click handler on an occupied line's pill - which voice note's
-  // popover (if any) is open. Same NodeView/PluginView -> React bridge shape as pinPopover.
+  // Set by voiceNoteInlineView.ts's (or the legacy voiceNoteGrips.ts's) click handler on a filled
+  // voice-note pill - which voice note's popover (if any) is open. Same NodeView/PluginView ->
+  // React bridge shape as pinPopover.
   const [voiceNotePopover, setVoiceNotePopover] = useState<VoiceNoteClickedDetail | null>(null);
+  // The live recording panel, if a voice note is currently being recorded - opened by
+  // voiceNoteInlineView.ts asking for a session (VOICE_NOTE_RECORD_EVENT) rather than driving the
+  // microphone itself, so the countdown/pause/restart UI can be a real React panel.
+  const [voiceRecorder, setVoiceRecorder] = useState<VoiceNoteRecordDetail | null>(null);
   // Set by noteLinkClick.ts's/noteLinkChipView.ts's plain-click handling (see the
   // LINK_CLICKED_EVENT listener below) - which link's LinkPopover (if any) is open.
   const [linkPopover, setLinkPopover] = useState<LinkClickedDetail | null>(null);
@@ -375,14 +418,34 @@ function NoteEditor({
     return () => document.removeEventListener(NOTE_PIN_CLICKED_EVENT, onPinClicked);
   }, []);
 
-  // Bubbles up from voiceNoteGrips.ts's click handler on an occupied line's pill - same shape as
-  // onPinClicked above.
+  // Bubbles up from voiceNoteInlineView.ts's (or the legacy voiceNoteGrips.ts's) click handler on
+  // a filled voice-note pill - same shape as onPinClicked above.
   useEffect(() => {
     const onVoiceNoteClicked = (event: Event) => {
       setVoiceNotePopover((event as CustomEvent<VoiceNoteClickedDetail>).detail);
     };
     document.addEventListener(VOICE_NOTE_CLICKED_EVENT, onVoiceNoteClicked);
     return () => document.removeEventListener(VOICE_NOTE_CLICKED_EVENT, onVoiceNoteClicked);
+  }, []);
+
+  // A voice-note atom asking for a recording session, and (abort) one telling us its atom went
+  // away underneath an open one - see voiceNoteInlineView.ts. Opening a session also closes any
+  // playback popover, since both anchor to the same glyph.
+  useEffect(() => {
+    const onRecordRequested = (event: Event) => {
+      setVoiceNotePopover(null);
+      setVoiceRecorder((event as CustomEvent<VoiceNoteRecordDetail>).detail);
+    };
+    const onRecordAborted = (event: Event) => {
+      const { id } = (event as CustomEvent<{ id: string }>).detail;
+      setVoiceRecorder((current) => (current?.id === id ? null : current));
+    };
+    document.addEventListener(VOICE_NOTE_RECORD_EVENT, onRecordRequested);
+    document.addEventListener(VOICE_NOTE_RECORD_ABORT_EVENT, onRecordAborted);
+    return () => {
+      document.removeEventListener(VOICE_NOTE_RECORD_EVENT, onRecordRequested);
+      document.removeEventListener(VOICE_NOTE_RECORD_ABORT_EVENT, onRecordAborted);
+    };
   }, []);
 
   // Bubbles up from a plain click on either link shape - real link-marked text (noteLinkClick.ts)
@@ -411,6 +474,13 @@ function NoteEditor({
     debouncedSave(value);
   }
 
+  // Placeholder until the pageSetup-tracking effect below (declared later, once `pageSetup`
+  // itself is in scope) populates real values and forces a first real recompute - see that
+  // effect's own comment. A ref (not state) since paginationLayout.ts's PluginView reads this
+  // synchronously on every measurement pass, the same "ref bridge" shape noteLinkResultsRef
+  // already uses just below for the same reason (a plugin can't call React hooks).
+  const paginationMetricsRef = useRef<PaginationMetrics>({ usablePageHeightPx: 0, marginTopPx: 0, marginBottomPx: 0, layoutKey: "" });
+
   const { get } = useEditor((root) => {
     const editor = MilkdownEditor.make();
     editor.config((ctx) => {
@@ -426,8 +496,8 @@ function NoteEditor({
       setNoteLinkTrigger,
       noteLinkResultsRef,
       setSelectionRange,
-      voiceNotesEnabled,
       collabSession,
+      paginated ? { metricsRef: paginationMetricsRef, onLayoutChanged: setPageRects } : undefined,
     );
     return editor;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -519,6 +589,122 @@ function NoteEditor({
   function handleSelectLook(next: NoteLook) {
     setLook(next);
     setNoteLook(notePath, next);
+  }
+
+  // --- Page setup: Fixed-Size notes' page dimensions/margins, independent of content --------
+  const [pageSetup, setPageSetupState] = useState<PageSetup>(DEFAULT_PAGE_SETUP);
+
+  useEffect(() => {
+    if (!paginated) return;
+    let cancelled = false;
+    (async () => {
+      const value = await getPageSetup(notePath);
+      if (!cancelled) setPageSetupState(value);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Same "notePath is stable for this mount" reasoning as the look effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleChangePageSetup(next: PageSetup) {
+    setPageSetupState(next);
+    void persistPageSetup(notePath, next);
+  }
+
+  const pageWidthPx = mmToPx(pageDimensionsMm(pageSetup).widthMm);
+  const pageHeightPx = mmToPx(pageDimensionsMm(pageSetup).heightMm);
+  const pageMarginPx = mmToPx(clampedMarginMm(pageSetup));
+  // Top/bottom only - left/right stay on pageMarginPx. See utils/pageSizes.ts's own comment.
+  const pageVerticalMarginPx = verticalMarginPx(pageSetup, look);
+
+  // Fixed-Size zoom: `transform: scale`, not CSS `zoom` - the earlier CSS-`zoom` version reran
+  // actual text shaping at each zoom level, and WebKit's line-breaking under that isn't reliably
+  // reflow-invariant (confirmed live: the exact same paragraph wrapped after a different word at
+  // 60% than at 50%), which cascaded into pages breaking at different content depending on zoom
+  // alone. `transform` never re-lays-out its subtree - the page is always measured/word-wrapped
+  // at its one true native size, and zoom becomes a pure post-layout visual scale, so wrapping and
+  // pagination are now identical at every zoom level by construction, not by arithmetic patched on
+  // top. The tradeoff `transform` doesn't hand you for free (unlike `zoom`, it doesn't grow the
+  // scrollable area to match) is handled explicitly below: `pageContentHeightPx`'s zoomed footprint
+  // is reserved on an outer wrapper so the user can still scroll to every part of an oversized page.
+  const [zoom, setZoom] = useState(1);
+  const handleZoomOut = () => setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10));
+  const handleZoomIn = () => setZoom((z) => Math.min(2, Math.round((z + 0.1) * 10) / 10));
+
+  // Real computed page rectangles from milkdown/paginationLayout.ts's live measurement engine
+  // (see its own comment) - starts as a single page-1-sized rectangle so even an empty/short
+  // note immediately looks like "one page on a canvas" before any measurement has run.
+  // pageRects are always in native/unscaled px (paginationLayout.ts measures with the zoom
+  // transform switched off - see its own top-of-file comment) - the ancestor's `transform: scale`
+  // scales them visually exactly once, so no `* zoom` here.
+  const [pageRects, setPageRects] = useState<PageRect[]>([{ top: 0, height: pageHeightPx }]);
+  // The native (unscaled) total height of the paginated canvas - the bottom edge of the last
+  // page rect, exactly matching what sketchWrapperRef itself naturally renders at zoom 1. Used
+  // below to reserve that same footprint (scaled by `zoom`) on the outer wrapper so the
+  // `overflow-auto` scroll container still lets the user reach every part of an oversized page -
+  // `transform`, unlike the CSS `zoom` this replaced, doesn't grow the scrollable area on its own.
+  const pageContentHeightPx = pageRects.length ? pageRects[pageRects.length - 1].top + pageRects[pageRects.length - 1].height : pageHeightPx;
+  useEffect(() => {
+    // Only while paginationLayout.ts hasn't computed anything real yet (a note with content
+    // longer than one page) - once it has, its own callback (see the plugin wiring below) is
+    // the sole source of truth for pageRects and this default-refresh would fight it.
+    setPageRects((prev) => (prev.length <= 1 ? [{ top: 0, height: pageHeightPx }] : prev));
+  }, [pageHeightPx]);
+
+  // Keeps paginationLayout.ts's live metrics ref (declared above, before useEditor) up to date
+  // as PageSetup or `look` changes, and forces a recompute: the PluginView's own `update()` hook
+  // only fires on a dispatched transaction, so a PageSetup/look-only change (no doc edit) needs an
+  // explicit (empty) transaction dispatched here to make it notice - same reasoning as
+  // Editor.tsx's other ref-bridge effect just above for noteLinkResultsRef, which the plugin
+  // itself picks up passively on its own next natural update instead, since that ref doesn't
+  // need to force one. `look` is in here (as `layoutKey`, see PaginationMetrics's own comment on
+  // that field) despite not being a page dimension at all: Paper/Index Card force text onto a
+  // `line-height: var(--rule)` grid that changes every block's rendered height purely via CSS, so
+  // switching look needs the exact same forced recompute a real PageSetup change does, or every
+  // page keeps whichever look's break points were last actually computed.
+  //
+  // No `zoom` here (there used to be): paginationLayout.ts now measures with the display zoom
+  // transform switched off (see its own top-of-file comment), so its output no longer depends on
+  // zoom at all - changing it doesn't need to (and shouldn't) trigger a recompute.
+  useEffect(() => {
+    if (!paginated) return;
+    paginationMetricsRef.current = {
+      usablePageHeightPx: pageHeightPx - 2 * pageVerticalMarginPx,
+      marginTopPx: pageVerticalMarginPx,
+      marginBottomPx: pageVerticalMarginPx,
+      layoutKey: look,
+    };
+    run((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      view.dispatch(view.state.tr);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paginated, pageHeightPx, pageVerticalMarginPx, look]);
+
+  // CSS's `@page` rule doesn't reliably resolve `var()` custom properties for `size` across
+  // browsers/webviews, so the page dimensions are injected as a literal, disposable <style> tag
+  // right before printing rather than as a static CSS rule - removed again once printing is done
+  // (or cancelled), via the standard "afterprint" event (plus a "focus" fallback: the OS print
+  // panel returns focus to the window on close, and "afterprint" isn't reliable enough on its own
+  // for a native panel like this to be the only trigger - see index.css's own `@media print`
+  // comment for why the zoom/page-break-position side of printing no longer depends on any of
+  // this cleanup running at all, after that exact unreliability visibly left the page shifted).
+  function handlePrint() {
+    const { widthMm, heightMm } = pageDimensionsMm(pageSetup);
+    const styleEl = document.createElement("style");
+    styleEl.textContent = `@page { size: ${widthMm}mm ${heightMm}mm; margin: ${clampedMarginMm(pageSetup)}mm; }`;
+    document.head.appendChild(styleEl);
+
+    const cleanup = () => {
+      styleEl.remove();
+      window.removeEventListener("afterprint", cleanup);
+      window.removeEventListener("focus", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    window.addEventListener("focus", cleanup);
+    window.print();
   }
 
   // Tells every image NodeView to recompute its ruled-paper alignment compensation whenever
@@ -623,6 +809,10 @@ function NoteEditor({
   // wrapper, so its rect shares the exact origin this ref measures - no
   // separate ref/imperative handle into SketchLayer needed.
   const sketchWrapperRef = useRef<HTMLDivElement>(null);
+  // Fixed-Size notes only: the outer spacer around sketchWrapperRef that reserves its zoomed
+  // (visual) footprint for scrolling - see the `zoom` state's own comment. Only handlePrint needs
+  // an imperative handle into it (to momentarily un-zoom the reserved size for printing/export).
+  const zoomStageRef = useRef<HTMLDivElement>(null);
 
   // Tier A (see textDecorationMarks.ts/sketchDecorations.ts): a gesture that
   // geometrically reads as a highlight/underline over real text becomes a
@@ -834,14 +1024,42 @@ function NoteEditor({
     // other copied text is left to Milkdown's normal paste handling.
     const text = e.clipboardData.getData("text/plain").trim();
     const target = text ? parseNoteLinkHref(text) : null;
-    if (!target || !noteChoices.some((n) => n.path === target.path)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    run((ctx) => {
-      const view = ctx.get(editorViewCtx);
-      const node = noteLinkChipSchema.type(ctx).create({ href: text, linkTitle: describeNoteLinkTarget(target) });
-      view.dispatch(view.state.tr.replaceSelectionWith(node));
-    });
+    if (target && noteChoices.some((n) => n.path === target.path)) {
+      e.preventDefault();
+      e.stopPropagation();
+      run((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const node = noteLinkChipSchema.type(ctx).create({ href: text, linkTitle: describeNoteLinkTarget(target) });
+        view.dispatch(view.state.tr.replaceSelectionWith(node));
+      });
+      return;
+    }
+
+    // Plain multi-line text with no text/html (a lorem-ipsum generator, a PDF, a terminal, "paste
+    // and match style") arrives at Milkdown's own paste handling (@milkdown/plugin-clipboard) as a
+    // raw markdown *source* string, which it runs through the CommonMark parser - and CommonMark
+    // joins any run of consecutive non-blank lines with no blank line between them into a single
+    // paragraph node. paginationLayout.ts can only inject a page-break margin *before* a top-level
+    // block, never inside one (top-level blocks are atomic there by design - see its own comment),
+    // so that single oversized paragraph just overflows straight through the page boundary instead
+    // of breaking the way the same text typed line-by-line (Enter makes a new paragraph each time)
+    // would. Rebuilding one plain paragraph per source line here, before Milkdown's handler ever
+    // sees the event, makes a paste land in the same per-line shape typing it would have produced,
+    // so the existing per-block pagination logic breaks it across pages correctly.
+    const html = e.clipboardData.getData("text/html");
+    if (!html && text.includes("\n")) {
+      e.preventDefault();
+      e.stopPropagation();
+      run((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const schema = ctx.get(schemaCtx);
+        const paragraphType = schema.nodes.paragraph;
+        const lines = text.split(/\r\n|\r|\n/);
+        const nodes = lines.map((line) => (line.length > 0 ? paragraphType.create(null, schema.text(line)) : paragraphType.create()));
+        const slice = new Slice(Fragment.fromArray(nodes), 0, 0);
+        view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView());
+      });
+    }
   }
 
   const emphasisGroup: ToolbarAction[] = [
@@ -968,6 +1186,26 @@ function NoteEditor({
     await navigator.clipboard.writeText(buildNoteLinkHref(notePath, { pinId: id }));
   }
 
+  // Toolbar mic button: plants a fresh `voiceNoteInline` atom right after the cursor (or the end
+  // of the current selection) and arms it to start recording the instant its NodeView mounts -
+  // see voiceNoteInlineView.ts's armAutoStartRecording. Unlike copyLinkToPoint above, this works
+  // from a collapsed cursor too (there's nothing to "link", but there's always somewhere to plant
+  // a voice note), and the id is generated here rather than at recording-finish time so the same
+  // value can be threaded through armAutoStartRecording.
+  function insertVoiceNoteAtCursor() {
+    run((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const id = crypto.randomUUID();
+      const node = voiceNoteInlineSchema.type(ctx).create({ voiceId: id, voiceSrc: null, voiceDur: 0 });
+      const pos = state.selection.to;
+      const tr = state.tr.insert(pos, node);
+      tr.setSelection(TextSelection.near(tr.doc.resolve(pos + node.nodeSize)));
+      armAutoStartRecording(id);
+      view.dispatch(tr);
+    });
+  }
+
   // "Add link" (SelectionLinkToolbar -> NoteLinkQuickPicker): applies an already-built href
   // (searched for, or pasted verbatim) to the selection active when the toolbar appeared. Safe to
   // read `state.selection` fresh here even though the popover's own <input> now holds DOM focus -
@@ -1024,7 +1262,7 @@ function NoteEditor({
             onSelect={(style) =>
               runAndSync((ctx) => {
                 liftOutOfList(ctx);
-                callCommand(wrapInHeadingCommand.key, style === "paragraph" ? 0 : style)(ctx);
+                setBlockStyle(ctx, style);
               })
             }
           />
@@ -1091,7 +1329,54 @@ function NoteEditor({
               <codeBlockButton.icon size={14} />
             </button>
           )}
+          {voiceNotesEnabled && (
+            <button
+              type="button"
+              onClick={insertVoiceNoteAtCursor}
+              title="Record voice note"
+              aria-label="Record voice note at cursor"
+              className="btn-ghost h-7 w-7 shrink-0"
+            >
+              <Mic size={14} />
+            </button>
+          )}
           <div className="divider mx-1 h-5 w-px shrink-0" />
+          {paginated && (
+            <>
+              <PageSetupDropdown setup={pageSetup} onChange={handleChangePageSetup} />
+              <button
+                type="button"
+                onClick={handlePrint}
+                title="Print / export as PDF"
+                aria-label="Print / export as PDF"
+                className="btn-ghost h-7 w-7 shrink-0"
+              >
+                <Printer size={14} />
+              </button>
+              <div className="divider mx-1 h-5 w-px shrink-0" />
+              <button
+                type="button"
+                onClick={handleZoomOut}
+                disabled={zoom <= 0.5}
+                title="Zoom out"
+                aria-label="Zoom out"
+                className="btn-ghost h-7 w-7 shrink-0 disabled:opacity-40"
+              >
+                <ZoomOut size={14} />
+              </button>
+              <span className="text-secondary w-10 shrink-0 text-center text-xs tabular-nums">{Math.round(zoom * 100)}%</span>
+              <button
+                type="button"
+                onClick={handleZoomIn}
+                disabled={zoom >= 2}
+                title="Zoom in"
+                aria-label="Zoom in"
+                className="btn-ghost h-7 w-7 shrink-0 disabled:opacity-40"
+              >
+                <ZoomIn size={14} />
+              </button>
+            </>
+          )}
           <LookDropdown look={look} onSelect={handleSelectLook} />
           {uploadError && <span className="text-danger ml-2 shrink-0 text-xs">{uploadError}</span>}
         </div>
@@ -1107,30 +1392,80 @@ function NoteEditor({
       <div
         ref={scrollContainerRef}
         onScroll={(e) => scrollPositions.set(notePath, e.currentTarget.scrollTop)}
-        className={`prose-note milkdown-scroll h-full flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`}
+        data-paginated={paginated || undefined}
+        className={
+          paginated
+            ? `prose-note milkdown-scroll h-full flex-1 overflow-auto px-8 py-10 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`
+            : `prose-note milkdown-scroll h-full flex-1 overflow-y-auto px-12 py-8 @max-lg:px-6 @max-lg:py-5 @max-sm:px-3 @max-sm:py-3 ${sketchMode ? "select-none" : ""} ${look !== "plain" ? `note-look-${look}` : ""}`
+        }
       >
-        <div
-          ref={sketchWrapperRef}
-          className="relative min-h-full"
-          onPasteCapture={handleEditorPaste}
-          onMouseDown={(e) => {
-            if (e.target !== e.currentTarget) return;
-            e.preventDefault();
-            focusNearestPosition(e.clientX, e.clientY);
-          }}
-        >
-          <Milkdown />
-          <SketchLayer
-            className="absolute inset-0"
-            active={sketchMode}
-            strokes={strokes}
-            tool={sketchTool}
-            color={sketchColor}
-            width={sketchWidth}
-            onAddStroke={handleAddStroke}
-            onEraseStrokes={handleEraseStrokes}
-          />
-        </div>
+        {paginated ? (
+          <div ref={zoomStageRef} className="zoom-stage relative mx-auto" style={{ width: pageWidthPx * zoom, height: pageContentHeightPx * zoom }}>
+            <div
+              ref={sketchWrapperRef}
+              className="note-content-surface absolute left-0 top-0"
+              style={{
+                width: pageWidthPx,
+                minHeight: pageHeightPx,
+                paddingLeft: pageMarginPx,
+                paddingRight: pageMarginPx,
+                paddingTop: pageVerticalMarginPx,
+                paddingBottom: pageVerticalMarginPx,
+                transform: `scale(${zoom})`,
+                transformOrigin: "top left",
+              }}
+              onPasteCapture={handleEditorPaste}
+              onMouseDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                e.preventDefault();
+                focusNearestPosition(e.clientX, e.clientY);
+              }}
+            >
+              <PageBackdrop
+                pages={pageRects}
+                width={pageWidthPx}
+                marginPx={pageMarginPx}
+                verticalMarginPx={pageVerticalMarginPx}
+                look={look}
+              />
+              <Milkdown />
+              <SketchLayer
+                className="absolute inset-0"
+                active={sketchMode}
+                strokes={strokes}
+                tool={sketchTool}
+                color={sketchColor}
+                width={sketchWidth}
+                onAddStroke={handleAddStroke}
+                onEraseStrokes={handleEraseStrokes}
+                zoom={zoom}
+              />
+            </div>
+          </div>
+        ) : (
+          <div
+            ref={sketchWrapperRef}
+            className="note-content-surface relative min-h-full"
+            onPasteCapture={handleEditorPaste}
+            onMouseDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              e.preventDefault();
+              focusNearestPosition(e.clientX, e.clientY);
+            }}
+          >
+            <Milkdown />
+            <SketchLayer
+              className="absolute inset-0"
+              active={sketchMode}
+              strokes={strokes}
+              tool={sketchTool}
+              color={sketchColor}
+              width={sketchWidth}
+              onAddStroke={handleAddStroke}
+              onEraseStrokes={handleEraseStrokes}
+            />
+          </div>
+        )}
       </div>
 
       <SelectedImageToolbar
@@ -1172,6 +1507,26 @@ function NoteEditor({
           onAppend={voiceNotePopover.startAppend}
           onRemove={voiceNotePopover.remove}
           onClose={() => setVoiceNotePopover(null)}
+        />
+      )}
+
+      {voiceRecorder && (
+        // Keyed by the atom being recorded onto: starting a second recording while one is open
+        // must mount a *fresh* panel, so the outgoing one's cleanup releases its own microphone
+        // session rather than React reusing the instance and stranding it.
+        <VoiceRecorderPopover
+          key={voiceRecorder.id}
+          anchorRef={{ current: voiceRecorder.element }}
+          countdownSeconds={voiceNoteCountdown}
+          isAppend={voiceRecorder.isAppend}
+          onComplete={(wav, durationMs) => {
+            voiceRecorder.complete(wav, durationMs);
+            setVoiceRecorder(null);
+          }}
+          onCancel={() => {
+            voiceRecorder.cancel();
+            setVoiceRecorder(null);
+          }}
         />
       )}
 

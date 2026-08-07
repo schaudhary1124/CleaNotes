@@ -65,6 +65,12 @@ export type SessionCtrlMessage =
       signature: string;
       title: string;
       features: Record<string, boolean>;
+      // The note's kind (see NoteKind in types.ts) - plain string for the same JsonValue reason
+      // as `features` above. Lets the guest pick which shared types to attach to its Y.Doc (see
+      // collab/kindSharedTypes.ts) and which view component to render before finishing session
+      // setup, without needing any other channel to learn it (a browser guest has no access to
+      // the owner's cleanotes-meta.json, which is where kind otherwise lives).
+      kind: string;
     }
   | { type: "denied"; reason?: string }
   // Pushed to an already-connected peer when their role or the note's lock state changes -

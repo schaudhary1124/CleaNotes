@@ -85,13 +85,15 @@ export function SharedNoteView({ note, session, status, canEdit, onBack }: Share
             sketchEnabled={false}
             codeBlockEnabled={session.features.codeBlock}
             voiceNotesEnabled={false}
+            voiceNoteCountdown={0}
+            paginated={session.kind === "fixed-size"}
             noteChoices={[]}
             onNavigateToNoteLink={noop}
             collabSession={{
-              yXmlFragment: session.yXmlFragment,
+              yXmlFragment: session.shared.yXmlFragment,
               canEdit,
               awareness: session.awareness,
-              ySketchStrokes: session.ySketchStrokes,
+              ySketchStrokes: session.shared.ySketchStrokes,
               resolveAsset: session.resolveAsset,
             }}
           />
