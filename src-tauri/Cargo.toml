@@ -1,6 +1,6 @@
 [package]
 name = "cleanotes"
-version = "0.5.1"
+version = "0.5.2"
 description = "CleaNotes - a local-first Markdown note-taking and study app"
 authors = ["you"]
 edition = "2021"
