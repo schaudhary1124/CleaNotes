@@ -156,6 +156,31 @@ export function vectorEndpoints(el: ShapeElement): { a: BoardPoint; b: BoardPoin
     : { a: { x: el.x, y: el.y }, b: { x: el.x + el.w, y: el.y + el.h } };
 }
 
+/** The two endpoints of `el` if it reads as a line, or null if it doesn't.
+ *
+ * Two element kinds qualify, because the board has two ways of ending up with a line and the user
+ * can't see the difference: the line/arrow shapes, and the two-point ink stroke the pen's straighten
+ * assist commits (see inkAssist.ts). Both are a line in every way that shows on screen, so both get
+ * a line's treatment - endpoint selection, endpoint dragging - and neither exposes the storage it
+ * happens to use.
+ *
+ * A freehand scribble is deliberately excluded even when it looks straightish: its points are a
+ * path, and no two of them mean anything on their own.
+ *
+ * Note that an ink line's ends are *not* two corners of its bounds. inkFromPoints pads the box by
+ * half the stroke width, so on a thick stroke the ends sit visibly inside the box - which is
+ * exactly why anything drawing or hit-testing them has to ask here rather than measure the box. */
+export function lineEndpoints(el: BoardElement): { a: BoardPoint; b: BoardPoint } | null {
+  if (el.kind === "shape" && isVectorShape(el.shape)) return vectorEndpoints(el);
+  if (el.kind === "ink" && el.points.length === 2) {
+    return {
+      a: { x: el.x + el.points[0].x, y: el.y + el.points[0].y },
+      b: { x: el.x + el.points[1].x, y: el.y + el.points[1].y },
+    };
+  }
+  return null;
+}
+
 export type BoardTextAlign = "left" | "center" | "right";
 
 export interface TextElement extends BoardElementBase {
@@ -185,17 +210,54 @@ export interface ImageElement extends BoardElementBase {
 export interface CodeElement extends BoardElementBase {
   kind: "code";
   code: string;
-  /** CodeMirror language-data name, e.g. "javascript" - see codeWidgetLanguages.ts. */
+  /** CodeMirror language-data name, e.g. "javascript" - see milkdown/codeBlock.ts. */
   language: string;
+  /** Per-element editor font size in px. Absent reads as CODE_BLOCK_DEFAULT_FONT_SIZE, the same
+   * default (and the same zoom controls) a note-embedded code block has - see codeBlockGrips.ts. */
+  fontSize?: number;
+  /** Soft-wrap long lines instead of scrolling horizontally. Absent means off, which is how a code
+   * block has always behaved and so is what every block written before this existed reads back as. */
+  wrap?: boolean;
 }
+
+/** A table cell's background tint, or null for no fill - the board's equivalent of the note table's
+ * cell colours (see components/TableMenu.tsx's CELL_COLORS, which supplies the same palette). */
+export type BoardCellFill = string | null;
 
 export interface TableElement extends BoardElementBase {
   kind: "table";
   /** Row-major cell text. Every row is the same length; see tableOps.ts, which is the only
    * thing allowed to change the shape. */
   rows: string[][];
+  /** Whether the first row is styled as a header. Set once, at creation, and no longer toggleable
+   * from the widget: `boardDigest` emits row 0 as the Markdown header row whatever this says, so a
+   * toggle only ever controlled whether the table *looked* like what it already was. Kept as stored
+   * data rather than assumed, so a board whose header was switched off before the toggle went away
+   * still opens looking the way it was left. */
   headerRow: boolean;
+  /** Per-*column* text alignment. Stored per column rather than per cell to match Markdown's own
+   * table model, which is what `boardDigest` emits into the note's `.md`. Absent, or shorter than
+   * the row, reads as "left". */
+  align?: BoardTextAlign[];
+  /** Row-major cell fills, parallel to `rows`. Absent (the common case - most tables have no fills
+   * at all) means no cell is filled; ragged or stale entries read as null rather than throwing, so
+   * a fill array left behind by a hand-edited file can't desynchronize the grid. */
+  fills?: BoardCellFill[][];
+  /** Per-column widths and per-row heights, in the widget's own (unzoomed) px - see tableOps'
+   * DEFAULT_COL_WIDTH/DEFAULT_ROW_HEIGHT, which is what an absent, short, or nonsensical entry
+   * reads as.
+   *
+   * Sizes live on the element rather than being divided out of its box because the grid is
+   * *scrolled* inside that box, not fitted to it: adding a column makes the table wider than its
+   * frame instead of narrowing the columns already there, which is the only way a wide table stays
+   * readable on a board where the element's own size is a placement decision. */
+  colWidths?: number[];
+  rowHeights?: number[];
 }
+
+/** Playback rates the voice widget cycles through, matching the set a podcast/voice-memo player
+ * offers. 1 is the default and is stored as the *absence* of a rate. */
+export const VOICE_SPEEDS: readonly number[] = [1, 1.25, 1.5, 2, 0.75];
 
 export interface VoiceElement extends BoardElementBase {
   kind: "voice";
@@ -205,6 +267,9 @@ export interface VoiceElement extends BoardElementBase {
   /** Precomputed waveform buckets in 0..1, so the widget can paint without decoding audio. */
   peaks: number[];
   title?: string;
+  /** Playback rate; absent means 1. A document property rather than local UI state so a clip
+   * recorded fast (or slow) keeps playing back the way it was set up for everyone. */
+  speed?: number;
 }
 
 export type BoardElement =

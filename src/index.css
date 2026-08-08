@@ -1809,6 +1809,10 @@ input,
   --board-bg: #fbfbf9;
   --board-grid-minor: rgba(0, 0, 0, 0.09);
   --board-grid-major: rgba(0, 0, 0, 0.18);
+  /* The printed line an in-progress stroke is locked to (BoardInkLayer's drawGuide). Accent-tinted
+     and far stronger than either grid colour, because it is transient tool state rather than paper:
+     it has to be obvious which line the stroke is held to, and equally obvious when it lets go. */
+  --board-guide: rgb(var(--accent-rgb) / 0.65);
   --board-element-bg: rgba(255, 255, 255, 0.9);
   /* Toolbar tooltips: deliberately the inverse of the surface they sit on, since they overlap both
      the toolbar and the canvas and have to be legible against either. */
@@ -1820,6 +1824,9 @@ input,
   --board-bg: #0e0e14;
   --board-grid-minor: rgba(255, 255, 255, 0.08);
   --board-grid-major: rgba(255, 255, 255, 0.16);
+  /* Lifted on a dark board for the same reason the tooltip is: the accent at 0.65 reads as muddy
+     against near-black, where the grid lines it has to outrank are pale. */
+  --board-guide: rgb(var(--accent-rgb) / 0.85);
   --board-element-bg: rgba(255, 255, 255, 0.06);
   /* Lifted rather than inverted: a white tooltip on a near-black board reads as a flash. */
   --tip-bg: #2c2c36;
@@ -1933,8 +1940,12 @@ input,
      own scroll/pinch handling fires first and fights every one of them. */
   touch-action: none;
   /* A drag that starts on a text element would otherwise begin a native text selection that
-     follows the pointer across the whole board. */
+     follows the pointer across the whole board. Prefixed as well as standard: WKWebView only
+     honours the unprefixed property from Safari 17, and where it is ignored the selection reaches
+     the two <canvas> children - replaced elements, so `::selection` paints across their whole box
+     rather than over glyphs, washing the entire board in the accent colour. */
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .board-background,
@@ -2120,7 +2131,8 @@ input,
 }
 
 .board-code-widget,
-.board-table-widget {
+.board-table-widget,
+.board-voice-widget {
   flex-direction: column;
 }
 
@@ -2137,20 +2149,43 @@ input,
      the element. Once editing, `.is-editing` makes the bar's buttons live like the rest. */
 }
 
+/* Pushes whatever follows it to the far end of the bar, so a widget's identity (a code block's
+   language) and the things it adds stay left, while the tools that act on the whole widget stay
+   right however many there are. */
+.board-widget-bar-end {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
 .board-widget-chip,
 .board-widget-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 3px;
   border-radius: 5px;
   color: var(--text-secondary);
-  transition: background-color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .board-widget-chip {
   height: 18px;
   padding: 0 6px;
   font-size: 10px;
+  white-space: nowrap;
+}
+
+/* The one chip that names a value rather than toggling one (a code block's language), so it gets a
+   button's affordances - a border and room for its caret. */
+.board-widget-chip-wide {
+  max-width: 45%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  text-overflow: ellipsis;
 }
 
 .board-widget-icon {
@@ -2158,15 +2193,28 @@ input,
   width: 18px;
 }
 
-.board-widget-chip:hover,
-.board-widget-icon:hover {
+.board-widget-chip:hover:not(:disabled),
+.board-widget-icon:hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--text-primary);
 }
 
-.board-widget-chip.is-on {
+.board-widget-chip.is-on,
+.board-widget-icon.is-on {
   background: rgb(var(--accent-rgb) / 0.14);
   color: rgb(var(--accent-rgb));
+}
+
+/* Momentary "that worked" state - the copy button's checkmark. */
+.board-widget-icon.is-done {
+  color: rgb(var(--accent-rgb));
+}
+
+/* Destructive tools sit in the same bar as the rest and so look the same until reached for - a
+   permanently red button in a toolbar reads as a warning about the widget, not about the button. */
+.board-widget-icon.is-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .board-widget-chip:disabled,
@@ -2174,14 +2222,20 @@ input,
   opacity: 0.4;
 }
 
+/* Positioned against `.board-element`, not against the widget: every widget box clips its own
+   overflow (a code block scrolls, a table scrolls), so a dropdown rendered inside one would be cut
+   off at its edge. The widgets render their menus as a sibling of that box instead - see
+   CodeWidget/VoiceWidget - and the offsets here are measured from the element's top-left, which is
+   where each widget's toolbar starts anyway. */
 .board-widget-menu {
   position: absolute;
   top: 26px;
   left: 6px;
   z-index: 5;
-  max-height: 200px;
-  width: 150px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  width: 170px;
   padding: 4px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -2189,8 +2243,48 @@ input,
   box-shadow: var(--shadow-lg);
 }
 
+/* The voice note's overflow menu hangs off a button at the *right* end of its head row, so it is
+   right-aligned rather than pinned to the widget's left edge like the language picker. */
+.board-widget-menu.is-voice {
+  top: 28px;
+  right: 6px;
+  left: auto;
+  width: 140px;
+}
+
+.board-widget-menu-search {
+  flex-shrink: 0;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  font-size: 11px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.board-widget-menu-search:focus {
+  border-color: rgb(var(--accent-rgb) / 0.5);
+}
+
+.board-widget-menu-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.board-widget-menu-empty {
+  padding: 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 .board-widget-menu-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
   padding: 3px 6px;
   border-radius: 5px;
@@ -2199,8 +2293,24 @@ input,
   color: var(--text-primary);
 }
 
-.board-widget-menu-item:hover {
+.board-widget-menu-item:hover:not(:disabled) {
   background: var(--surface-hover);
+}
+
+.board-widget-menu-item.is-on {
+  color: rgb(var(--accent-rgb));
+}
+
+.board-widget-menu-item.is-danger {
+  color: var(--danger);
+}
+
+.board-widget-menu-item.is-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.board-widget-menu-item:disabled {
+  opacity: 0.4;
 }
 
 .board-code-host {
@@ -2213,45 +2323,368 @@ input,
   height: 100%;
 }
 
+/* ---- code block find & replace ---- */
+
+/* A bar under the widget's toolbar rather than a floating popup (which is what a note's code block
+   gets - see codeBlockGrips.ts's SearchPopup): a board element is already a free-floating box the
+   user placed, and a second one anchored to it would have to be repositioned against pan, zoom and
+   the element's own drag. */
+.board-code-search {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.board-code-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-strong);
+  font-size: 11px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.board-code-search-input:focus {
+  border-color: rgb(var(--accent-rgb) / 0.5);
+}
+
+.board-code-search-count {
+  flex-shrink: 0;
+  min-width: 34px;
+  text-align: center;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* ---- table ---- */
+
 .board-table-scroll {
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
 
+/* `separate` rather than `collapse`: a collapsed border belongs to the table, not to the cell that
+   drew it, and a sticky cell leaves its share of one behind when it scrolls - which is exactly what
+   both grip strips do. Each cell paints its own right and bottom edge instead, and the cells along
+   the grid's top and left paint the two edges nothing else would.
+
+   `fixed` is what makes a table wider than its own frame possible at all: under `auto` the browser
+   divides the frame between however many columns exist, so inserting one narrows every other. Here
+   each column takes exactly the width stored for it (see tableOps' colWidth) and the surplus
+   scrolls. */
 .board-table {
-  width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
   font-size: 12px;
 }
 
 .board-table td {
-  border: 1px solid var(--table-border);
   padding: 0;
 }
 
+.board-table-cell {
+  position: relative;
+  border-right: 1px solid var(--table-border);
+  border-bottom: 1px solid var(--table-border);
+}
+
+.board-table-cell.is-left {
+  border-left: 1px solid var(--table-border);
+}
+
+.board-table-cell.is-top {
+  border-top: 1px solid var(--table-border);
+}
+
+/* Absolutely positioned so the cell's height is the row's height and nothing else: a row can then
+   be dragged shorter than the text inside it without its own content propping it open. */
 .board-table input {
+  position: absolute;
+  inset: 0;
   width: 100%;
+  height: 100%;
   padding: 3px 6px;
   background: transparent;
   color: var(--text-primary);
   outline: none;
 }
 
+.board-table input:focus {
+  box-shadow: inset 0 0 0 1.5px rgb(var(--accent-rgb) / 0.55);
+}
+
 .board-table tr.is-header input {
   font-weight: 600;
 }
 
+/* `background-color`, not the shorthand: the line highlight below is a background *image*, and a
+   shorthand here would clear it on the header row alone. */
 .board-table tr.is-header td {
-  background: var(--surface-hover);
+  background-color: var(--surface-hover);
+}
+
+/* The row or column an open menu is acting on. Painted as an image so it layers over whatever the
+   cell's own colour is - a tinted column still reads as tinted while its menu is open, and a filled
+   cell doesn't drop out of the highlight. Specific enough to outrank the header row's cells, which
+   would otherwise be the one row that couldn't show it. */
+.board-table tr td.board-table-cell.is-lit {
+  background-image: linear-gradient(rgb(var(--accent-rgb) / 0.11), rgb(var(--accent-rgb) / 0.11));
+}
+
+/* The grip strips read as a spreadsheet's own header band: a tinted, ruled cell per line rather
+   than a marker floating in blank space, which is what makes the gutter look like part of the table
+   instead of padding around it. They are the same size either way - the tint and the rules are all
+   that changed.
+
+   Three background layers, painted last-listed first: the board's colour to be opaque with (both
+   `--board-element-bg` and `--surface-hover` are translucent, and the rows sliding underneath a
+   sticky strip have to stay hidden), then the widget's own translucent fill so the strip matches
+   the surface it sits on, then the header tint on top.
+
+   Written with the `tr td` prefix so it outranks the header row's own cell background, which would
+   otherwise reach the grip cell sitting in that row. */
+.board-table tr td.board-table-grip-cell,
+.board-table tr td.board-table-corner {
+  background-color: var(--board-bg);
+  background-image:
+    linear-gradient(var(--surface-hover), var(--surface-hover)),
+    linear-gradient(var(--board-element-bg), var(--board-element-bg));
+}
+
+/* Each grip is ruled only on the sides the grid doesn't already rule for it: a column grip's bottom
+   edge is the first data row's `is-top` border and a row grip's right edge is the first column's
+   `is-left` border, so drawing those here would double them into a 2px line. */
+.board-table tr td.board-table-corner {
+  border: 1px solid var(--table-border);
+}
+
+.board-table tr td.board-table-grip-cell.is-col {
+  border-top: 1px solid var(--table-border);
+  border-right: 1px solid var(--table-border);
+}
+
+.board-table tr td.board-table-grip-cell.is-row {
+  border-left: 1px solid var(--table-border);
+  border-bottom: 1px solid var(--table-border);
+}
+
+/* Both strips are sticky, and the corner where they meet outranks each of them. Without this a
+   table scrolled down has no column grips and one scrolled right has no row grips - which is
+   precisely where a wide or long table needs them, and the strips are now the only way to resize a
+   line or reach a delete.
+
+   Sticky is also what gives each grip cell the containing block its button and handles are
+   positioned against, so nothing outside these three rules may set `position` on them - a rule
+   reaching for `relative` to get that containing block would outrank one strip's `sticky` here and
+   silently unstick it on its own, which looks like a scrolling bug rather than a cascade one. */
+.board-table tr td.board-table-grip-cell.is-col {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.board-table tr td.board-table-grip-cell.is-row {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+
+.board-table tr td.board-table-corner {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 3;
+}
+
+/* Fills its cell, so the whole band is the target rather than a shape drawn inside it.
+   Absolutely positioned rather than sized at `height: 100%`: a percentage height inside a `<td>`
+   has no definite containing block to resolve against and collapses to nothing, which leaves a grip
+   that is invisible and unclickable. Every child of a cell in this table is placed the same way,
+   for the same reason. */
+.board-table-grip {
+  position: absolute;
+  inset: 0;
+  /* Stated as well as implied by `inset`: a form control's `width: auto` is its intrinsic size, not
+     the stretch its offsets ask for, and a button left to size itself here shrinks to nothing. */
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.board-table-grip:hover {
+  background: rgb(var(--accent-rgb) / 0.12);
+}
+
+/* The grips belonging to the cell the caret is in. A tint, not a colour: this is feedback about
+   where you are, not about what a click would do - `is-on`, below, is the loud one, and the two are
+   visible side by side the moment a menu opens. */
+.board-table-grip.is-active {
+  background: rgb(var(--accent-rgb) / 0.2);
+}
+
+.board-table-grip.is-on,
+.board-table-grip.is-on:hover {
+  background: rgb(var(--accent-rgb) / 0.5);
+}
+
+/* Centred on the boundary it moves rather than tucked inside one of the two lines, so the target is
+   the line the eye already reads as the edge. It hangs back over the *previous* grip, which is what
+   keeps it visible without any cell having to outrank another - see TableWidget's ResizeHandle. */
+.board-table-resize {
+  position: absolute;
+  z-index: 1;
+  touch-action: none;
+}
+
+.board-table-resize.is-col {
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+}
+
+.board-table-resize.is-row {
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 6px;
+  cursor: row-resize;
+}
+
+/* The handle the last line carries for its own outer edge: nothing beyond it to straddle. */
+.board-table-resize.is-col.is-trailing {
+  left: auto;
+  right: 0;
+}
+
+.board-table-resize.is-row.is-trailing {
+  top: auto;
+  bottom: 0;
+}
+
+/* The line the drag would move, shown only while the pointer is on it - a permanently visible
+   handle on every grip would turn the two thin strips into a ladder. */
+.board-table-resize::after {
+  content: "";
+  position: absolute;
+  border-radius: 2px;
+  background: rgb(var(--accent-rgb));
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.board-table-resize.is-col::after {
+  inset: 0 2px;
+}
+
+.board-table-resize.is-row::after {
+  inset: 2px 0;
+}
+
+/* The trailing handle sits inside the table, so its line hugs the outer edge it moves rather than
+   floating a couple of px in from it. */
+.board-table-resize.is-col.is-trailing::after {
+  left: auto;
+  right: 0;
+  width: 2px;
+}
+
+.board-table-resize.is-row.is-trailing::after {
+  top: auto;
+  bottom: 0;
+  height: 2px;
+}
+
+.board-table-resize:hover::after {
+  opacity: 0.7;
+}
+
+/* Rendered outside `.board-table-widget` (which clips its own scroll) and positioned in the
+   element's coordinate space, so it can overhang the table it belongs to. Which side it opens on is
+   decided per-menu at open time - see TableWidget's placeMenu. */
+.board-table-menu {
+  position: absolute;
+  z-index: 6;
+  width: 168px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.board-table-menu-divider {
+  margin: 4px 2px;
+  border-top: 1px solid var(--border);
+}
+
+.board-table-menu-label {
+  padding: 0 6px 3px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.board-table-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px 3px;
+}
+
+.board-table-menu-row.is-wrap {
+  flex-wrap: wrap;
+}
+
+.board-table-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 15px;
+  width: 15px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.board-table-swatch:hover {
+  border-color: rgb(var(--accent-rgb));
 }
 
 /* ---- voice note ---- */
 
 .board-voice-widget {
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.board-voice-head {
+  position: relative;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.board-voice-transport {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  min-height: 0;
 }
 
 .board-voice-play {
@@ -2270,13 +2703,25 @@ input,
   opacity: 0.4;
 }
 
-.board-voice-body {
-  flex: 1;
-  min-width: 0;
+/* The ±5s buttons: a rewind glyph with its own "5" centred inside it, the same badge treatment
+   VoiceNotePopover.tsx gives them. */
+.board-voice-skip {
+  position: relative;
+  flex-shrink: 0;
+  height: 20px;
+  width: 20px;
+}
+
+.board-voice-skip span {
+  position: absolute;
+  font-size: 7px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .board-voice-title {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -2288,8 +2733,15 @@ input,
   display: flex;
   align-items: center;
   gap: 1px;
-  height: 26px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  max-height: 34px;
   cursor: pointer;
+  /* A scrub is a drag, and without this the WebView starts a native text selection under it - the
+     same accent-coloured wash over the canvas the board's own gestures suppress. */
+  touch-action: none;
+  user-select: none;
 }
 
 .board-voice-wave span {

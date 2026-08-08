@@ -26,17 +26,25 @@ export const BoardElementView = memo(function BoardElementView({
   interactive,
   onPatch,
   onStartEditing,
+  onAppendVoice,
+  onDelete,
   editing,
   assets,
 }: {
   element: BoardElement;
   selected: boolean;
-  /** True only when the select tool is active and the element isn't locked - widgets and text
-   * boxes must stay click-through while a drawing tool owns the pointer. */
+  /** True only when the select tool is active, the element isn't locked, and it is the element
+   * currently being edited - widgets and text boxes must stay click-through otherwise, so a drawing
+   * tool (or a drag passing over the top of them) keeps the pointer. */
   interactive: boolean;
   onPatch: (patch: Partial<BoardElement>) => void;
   onStartEditing: () => void;
-  /** Text elements enter a real editing state on double-click; everything else ignores this. */
+  /** Opens the recorder to append onto this voice note. Owned by the workspace - recording needs
+   * the board's asset store and its modal surface - and ignored by every other kind. */
+  onAppendVoice: () => void;
+  onDelete: () => void;
+  /** Whether this element is the one open for editing (see BoardWorkspace's select-then-edit
+   * gesture). Text boxes turn on a caret; widgets turn on their own chrome. */
   editing: boolean;
   /** How this board reaches image/audio bytes - differs between the owner's device and a guest's;
    * see BoardAssets. */
@@ -59,19 +67,30 @@ export const BoardElementView = memo(function BoardElementView({
       style={style}
       data-element-id={element.id}
     >
-      {renderBody(element, interactive, editing, onPatch, onStartEditing, assets)}
+      {renderBody({ element, interactive, editing, onPatch, onStartEditing, onAppendVoice, onDelete, assets })}
     </div>
   );
 });
 
-function renderBody(
-  element: BoardElement,
-  interactive: boolean,
-  editing: boolean,
-  onPatch: (patch: Partial<BoardElement>) => void,
-  onStartEditing: () => void,
-  assets: BoardAssets,
-) {
+function renderBody({
+  element,
+  interactive,
+  editing,
+  onPatch,
+  onStartEditing,
+  onAppendVoice,
+  onDelete,
+  assets,
+}: {
+  element: BoardElement;
+  interactive: boolean;
+  editing: boolean;
+  onPatch: (patch: Partial<BoardElement>) => void;
+  onStartEditing: () => void;
+  onAppendVoice: () => void;
+  onDelete: () => void;
+  assets: BoardAssets;
+}) {
   switch (element.kind) {
     case "ink":
       return <InkBody element={element} />;
@@ -92,9 +111,20 @@ function renderBody(
     case "code":
       return <CodeWidget element={element} editable={interactive} onChange={onPatch} />;
     case "table":
-      return <TableWidget element={element} editable={interactive} onChange={onPatch} />;
+      return (
+        <TableWidget element={element} editable={interactive} onChange={onPatch} onDelete={onDelete} />
+      );
     case "voice":
-      return <VoiceWidget element={element} editable={interactive} onChange={onPatch} assets={assets} />;
+      return (
+        <VoiceWidget
+          element={element}
+          editable={interactive}
+          onChange={onPatch}
+          onAppend={onAppendVoice}
+          onDelete={onDelete}
+          assets={assets}
+        />
+      );
   }
 }
 

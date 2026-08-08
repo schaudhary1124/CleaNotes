@@ -25,6 +25,21 @@ export async function putAsset(assets: BoardAssets, bytes: Uint8Array): Promise<
   return key;
 }
 
+/** The raw bytes behind a key, from this device's store or - failing that - from a peer, exactly as
+ * `loadAssetUrl` resolves them. Needed by anything that has to *read* an asset rather than point an
+ * element at it: appending onto an existing voice note re-encodes the clip it already has (see
+ * milkdown/voiceRecording.ts's appendWav), which a blob URL can't supply. */
+export async function getAssetBytes(assets: BoardAssets, key: string): Promise<Uint8Array | null> {
+  const local = await assets.store.get(key);
+  if (local) return local;
+  if (!assets.fetchRemote) return null;
+  try {
+    return await assets.fetchRemote(key);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolves an AssetStore key into a blob URL usable as an `<img>`/`<audio>` src.
  *

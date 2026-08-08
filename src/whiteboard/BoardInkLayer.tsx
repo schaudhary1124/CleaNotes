@@ -2,7 +2,19 @@ import { useCallback, useEffect, useRef } from "react";
 import { dashPattern } from "./boardTypes";
 import type { BoardPoint, BoardStrokeStyle, BoardSurface, BoardViewport } from "./boardTypes";
 import { screenPointFromEvent, screenToWorld, worldToScreen, type EraserRegion } from "./geometry";
-import { assistStroke, type AssistResult } from "./inkAssist";
+import {
+  HOLD_DWELL_PX,
+  HOLD_STRAIGHTEN_MS,
+  advanceLiveAssist,
+  assistStroke,
+  beginLiveAssist,
+  guideSpan,
+  holdStraighten,
+  liveAssistLine,
+  type AssistResult,
+  type GuideLine,
+  type LiveAssist,
+} from "./inkAssist";
 
 export const HIGHLIGHTER_ALPHA = 0.35;
 
@@ -22,7 +34,9 @@ export const HIGHLIGHTER_ALPHA = 0.35;
  *
  * A live preview of the assist result (see inkAssist.ts) is drawn *while* the pointer is down on a
  * graph/isometric surface, so the user can see the line about to snap rather than being surprised
- * by it on release. */
+ * by it on release. This layer owns the two things the assist state machine can't compute for
+ * itself: the pointer samples that feed it, and the hold timer - a pointer resting perfectly still
+ * emits no events at all, so nothing but a timer would ever notice the pause. */
 /** The ink style a finished stroke is committed with - the drawing half of the toolbar's current
  * settings, resolved. */
 export interface InkStyle {
@@ -80,11 +94,44 @@ export function BoardInkLayer({
    * canvas. Drawn as an outline: a 48px square nib is otherwise invisible until it has already
    * deleted something, which makes both the size and shape settings unusable. */
   const hoverRef = useRef<BoardPoint | null>(null);
+  /** Whether the in-progress stroke has become a line, and by which route - see LiveAssist. Null
+   * between gestures. */
+  const liveRef = useRef<LiveAssist | null>(null);
+  const holdTimerRef = useRef<number | null>(null);
+  /** Where the pointer settled last. The hold gesture measures its second from here, not from the
+   * last sample, so a hand that trembles a few px in place still counts as holding. */
+  const holdAnchorRef = useRef<BoardPoint | null>(null);
   // Every value the paint path reads is mirrored into a ref so `redraw` can stay referentially
   // stable (empty dep array) and be called straight from pointer handlers without re-creating a
   // closure per sample.
-  const propsRef = useRef({ tool, color, width, dash, eraserSquare, surface, assistEnabled, viewport });
-  propsRef.current = { tool, color, width, dash, eraserSquare, surface, assistEnabled, viewport };
+  const propsRef = useRef({
+    tool,
+    color,
+    width,
+    dash,
+    eraserSquare,
+    surface,
+    assistEnabled,
+    viewport,
+    viewWidth,
+    viewHeight,
+  });
+  propsRef.current = {
+    tool,
+    color,
+    width,
+    dash,
+    eraserSquare,
+    surface,
+    assistEnabled,
+    viewport,
+    viewWidth,
+    viewHeight,
+  };
+  /** The resolved `--board-guide` colour, read once per stroke rather than per sample: reading a
+   * computed style is a style-recalc the paint path would otherwise pay for at pointer rate, and a
+   * theme cannot change between putting the pen down and lifting it. */
+  const guideColorRef = useRef("rgba(99, 102, 241, 0.65)");
 
   const resize = useCallback(() => {
     const canvas = canvasRef.current;
@@ -114,6 +161,8 @@ export function BoardInkLayer({
       surface: s,
       assistEnabled: assist,
       viewport: vp,
+      viewWidth: vw,
+      viewHeight: vh,
     } = propsRef.current;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -129,9 +178,15 @@ export function BoardInkLayer({
     if (raw.length === 0) return;
 
     // Preview the assisted result, not the raw path, so what's on screen mid-gesture is what will
-    // be committed. `assistStroke` is pure and cheap (one pass over the points), so running it per
+    // be committed. Both passes are pure and cheap (one walk over the points), so running them per
     // sample costs the same order as drawing the stroke itself.
-    const preview = assist ? assistStroke(raw, s) : { points: raw };
+    const live = liveRef.current;
+    const line = live ? liveAssistLine(live, raw) : null;
+    // Painted first so it sits behind the ink. Without it the lock has no visible state at all: the
+    // user would see a straight line but nothing telling them it is *held* to a particular line, or
+    // which one they are about to come off by pulling away.
+    if (live?.guide) drawGuide(ctx, live.guide, vp, vw, vh, guideColorRef.current);
+    const preview = line ? { points: line } : assist ? assistStroke(raw, s) : { points: raw };
     const pts = (preview.shape ? shapeOutline(preview.shape) : preview.points).map((p) =>
       worldToScreen(p, vp),
     );
@@ -177,8 +232,38 @@ export function BoardInkLayer({
     redraw();
   }, [tool, active, redraw]);
 
+  // Unmounting mid-stroke (closing the board, switching tabs) must not leave a timer that fires
+  // into a dead component.
+  useEffect(
+    () => () => {
+      if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+    },
+    [],
+  );
+
   function worldPoint(e: React.PointerEvent<HTMLCanvasElement>): BoardPoint {
     return screenToWorld(screenPointFromEvent(e, e.currentTarget), propsRef.current.viewport);
+  }
+
+  /** (Re)starts the hold countdown from `point`. Called on pointer-down and again every time the
+   * pointer leaves the dwell radius, so the wait is always measured from the moment the pointer
+   * last came to rest rather than from the start of the stroke. */
+  function armHold(point: BoardPoint) {
+    holdAnchorRef.current = point;
+    if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null;
+      const live = liveRef.current;
+      // The gesture may have ended in the meantime; and holdStraighten declines quietly when the
+      // path doesn't look like a line, which is why the repaint is conditional on it.
+      if (drawingRef.current && live && holdStraighten(live, pointsRef.current)) redraw();
+    }, HOLD_STRAIGHTEN_MS);
+  }
+
+  function cancelHold() {
+    if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+    holdAnchorRef.current = null;
   }
 
   /** The nib's footprint at `point`. `width` is a diameter, so the region's half-extent is half of
@@ -206,6 +291,13 @@ export function BoardInkLayer({
     }
     drawingRef.current = true;
     pointsRef.current = [point];
+    guideColorRef.current = resolveGuideColor(e.currentTarget);
+    const { surface: s, assistEnabled: assist, viewport: vp } = propsRef.current;
+    // The candidate guides are decided by where the pen goes *down* - "did you start on a line" is
+    // a question about this one point, and re-asking it later would let a stroke that wandered onto
+    // a line halfway through claim it started there.
+    liveRef.current = beginLiveAssist(point, s, assist, vp.zoom);
+    armHold(point);
     redraw();
   }
 
@@ -223,10 +315,21 @@ export function BoardInkLayer({
     // Drop samples that barely moved: at high zoom a slow hand emits dozens of sub-pixel points
     // per second, which bloats the stored stroke and skews inkAssist's path-length measurement
     // without adding any visible detail.
+    const zoom = propsRef.current.viewport.zoom;
     const last = pointsRef.current[pointsRef.current.length - 1];
-    const minStep = 1 / propsRef.current.viewport.zoom;
+    const minStep = 1 / zoom;
+    // Bailing here also means the hold keeps counting: a sample too small to record is a hand
+    // holding still, which is exactly what the gesture is waiting for.
     if (last && Math.hypot(point.x - last.x, point.y - last.y) < minStep) return;
     pointsRef.current.push(point);
+    const live = liveRef.current;
+    if (live) advanceLiveAssist(live, point, zoom);
+    const anchor = holdAnchorRef.current;
+    // Leaving the dwell radius means the pointer is travelling, not resting, so the countdown
+    // restarts from wherever it has got to.
+    if (!anchor || Math.hypot(point.x - anchor.x, point.y - anchor.y) * zoom > HOLD_DWELL_PX) {
+      armHold(point);
+    }
     redraw();
   }
 
@@ -239,15 +342,23 @@ export function BoardInkLayer({
     }
     if (!drawingRef.current) return;
     drawingRef.current = false;
+    cancelHold();
     const raw = pointsRef.current;
     pointsRef.current = [];
+    const live = liveRef.current;
+    liveRef.current = null;
     const { tool: t, color: c, width: w, dash: d, surface: s, assistEnabled: assist } = propsRef.current;
     if (raw.length > 0 && t !== "eraser") {
-      const result = assist
-        ? assistStroke(raw, s)
-        : // With assist off a lone tap still snaps nowhere, but a single point needs *some* extent
-          // to become a visible dot - inkFromPoints' width padding handles that.
-          { points: raw };
+      // A stroke that became a line commits as that line and nothing else - running the release
+      // pass over it as well could only disagree with what the user has been looking at.
+      const line = live ? liveAssistLine(live, raw) : null;
+      const result = line
+        ? { points: line }
+        : assist
+          ? assistStroke(raw, s)
+          : // With assist off a lone tap still snaps nowhere, but a single point needs *some* extent
+            // to become a visible dot - inkFromPoints' width padding handles that.
+            { points: raw };
       onCommit(result, { tool: t, color: c, width: w, dash: d });
     }
     redraw();
@@ -299,6 +410,48 @@ function drawEraserNib(
   if (square) ctx.rect(center.x - r, center.y - r, r * 2, r * 2);
   else ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
   ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** `--board-guide` as something canvas can accept.
+ *
+ * The variable is defined in terms of `--accent-rgb` so the guide follows the user's accent colour;
+ * a computed custom property has its `var()` references substituted, so this normally comes back as
+ * a literal colour. The guard is for the case where it doesn't: assigning an unsubstituted `var(…)`
+ * to `strokeStyle` is silently ignored, which would leave the guide painted in whatever colour the
+ * context happened to hold - the one failure mode worth a line of code to avoid. */
+function resolveGuideColor(canvas: HTMLCanvasElement): string {
+  const value = getComputedStyle(canvas).getPropertyValue("--board-guide").trim();
+  return value && !value.includes("var(") ? value : "rgba(99, 102, 241, 0.65)";
+}
+
+/** The printed line a stroke is currently held to, drawn across the viewport behind the ink.
+ *
+ * Dashed and in the accent colour rather than the grid's own grey: it has to read as a live tool
+ * state - "your line is attached to *this*" - and a solid grey line would just look like one grid
+ * line drawn heavier than its neighbours. */
+function drawGuide(
+  ctx: CanvasRenderingContext2D,
+  guide: GuideLine,
+  viewport: BoardViewport,
+  width: number,
+  height: number,
+  color: string,
+) {
+  // Rather than clip the infinite line to the viewport rect, extend it a full diagonal either side
+  // of the screen centre - the same picture on screen, without the case analysis.
+  const centre = screenToWorld({ x: width / 2, y: height / 2 }, viewport);
+  const [from, to] = guideSpan(guide, centre, Math.hypot(width, height) / viewport.zoom);
+  const a = worldToScreen(from, viewport);
+  const b = worldToScreen(to, viewport);
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
   ctx.stroke();
   ctx.restore();
 }

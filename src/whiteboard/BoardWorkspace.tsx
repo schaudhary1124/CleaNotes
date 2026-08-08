@@ -3,7 +3,14 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { BoardBackground } from "./BoardBackground";
 import { BoardElementView } from "./BoardElementView";
 import { BoardInkLayer } from "./BoardInkLayer";
-import { BoardSelection, resizeFromHandle, type ResizeHandleId } from "./BoardSelection";
+import {
+  BoardSelection,
+  flipAfterResize,
+  handleAt,
+  resizeFromHandle,
+  type ResizeHandleId,
+  type SelectionHandle,
+} from "./BoardSelection";
 import { BoardToolbar } from "./BoardToolbar";
 import { VoiceCapture } from "./VoiceCapture";
 import {
@@ -25,6 +32,7 @@ import {
   BOARD_GRID_SIZE,
   clampZoom,
   isVectorShape,
+  lineEndpoints,
   type BoardElement,
   type BoardPoint,
   type BoardRect,
@@ -32,6 +40,7 @@ import {
   type BoardStrokeStyle,
   type BoardViewport,
   type InkElement,
+  type ShapeElement,
 } from "./boardTypes";
 import {
   clampRect,
@@ -49,6 +58,7 @@ import {
   reorder,
   resizeElement,
   retargetShape,
+  setLineEndpoints,
   updateElements,
   type NewTextStyle,
 } from "./boardOps";
@@ -56,6 +66,7 @@ import {
   boundsOf,
   elementTouchesRegion,
   fitViewport,
+  hitTestElement,
   normalizeRect,
   rectsIntersect,
   screenPointFromEvent,
@@ -68,6 +79,19 @@ import {
 } from "./geometry";
 import { putAsset, type BoardAssets } from "./useAssetUrl";
 import type { BoardStore } from "./useBoardStore";
+
+/** How far from a resize handle's centre, in *screen* px, a press still counts as grabbing it. Wider
+ * than the 10px square that is drawn: a handle sits right at the edge of its element, so a miss
+ * lands on empty canvas and starts a marquee - which clears the selection, hides the handles, and
+ * re-selects as the band sweeps back over the element. Forgiving the near miss is what stops a
+ * resize from turning into that. */
+const HANDLE_GRAB_PX = 11;
+
+/** How far, in *screen* px, a press may travel and still count as a click rather than a drag - the
+ * distinction that decides whether releasing over an already-selected element opens it for editing
+ * or simply ends a (possibly very short) move. Sized for a hand holding a mouse or a stylus, where
+ * a "stationary" press still wanders a pixel or two. */
+const CLICK_SLOP_PX = 4;
 
 /** The board editing surface itself: an infinite, pannable, zoomable canvas of free-floating
  * elements.
@@ -91,8 +115,11 @@ import type { BoardStore } from "./useBoardStore";
  * Pointer handling is a small state machine (`gestureRef`) rather than per-element handlers:
  * elements are click-through by default and the root does hit-testing itself (geometry.ts's
  * `topmostAt`). That keeps a drag that starts on one element and continues over others coherent,
- * and it's what lets an element's *interior* become live only once it's explicitly being edited
- * (double-click), instead of every widget on the canvas competing for the pointer at all times.
+ * and it's what lets an element's *interior* become live only once it's explicitly being edited,
+ * instead of every widget on the canvas competing for the pointer at all times. Opening one is the
+ * standard two-stage canvas gesture - click to select, click the selection again (or double-click
+ * outright) to work inside it - implemented on the `move` gesture's `enterEdit`, since only
+ * pointer-*up* knows whether a press turned out to be a drag.
  *
  * `BoardElement` is still imported as a type only - no value import here reaches the filesystem. */
 export function BoardWorkspace({
@@ -131,6 +158,10 @@ export function BoardWorkspace({
   const [spaceHeld, setSpaceHeld] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [pendingVoiceAt, setPendingVoiceAt] = useState<BoardPoint | null>(null);
+  /** Element id when the recorder was opened from an existing voice note's "Record more", null when
+   * it was opened to place a new one - the one thing that decides what happens at the end of a
+   * recording, so it is tracked rather than inferred. */
+  const [appendVoiceTo, setAppendVoiceTo] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
@@ -223,6 +254,34 @@ export function BoardWorkspace({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    /** The DOM box of the topmost *selected* element under `anchor`, if there is one.
+     *
+     * Selection, rather than mere hover, is the gate: an unselected widget the pointer happens to
+     * be over has no claim on the wheel, or every pan that crossed a code block would stall on it.
+     * Hit-tested through the board's own geometry rather than through `e.target` because an
+     * element that isn't open for editing is `pointer-events: none` (see .board-element in
+     * index.css) and so never appears as an event target - which is exactly the case this exists
+     * to serve, a selected widget the user wants to scroll without clicking into it first.
+     *
+     * Restricted to the selection rather than reusing topmostAt, which answers a different
+     * question: an unselected element stacked over a selected table would be topmost, but it is
+     * click-through and inert, so letting it block the table's scroll would be arbitrary. */
+    const selectedBoxAt = (anchor: BoardPoint): Element | null => {
+      const selected = selectionRef.current;
+      // By far the most common wheel is a pan with nothing selected, and it shouldn't pay for a
+      // walk of the board to discover there was nothing to scroll.
+      if (selected.size === 0) return null;
+      const world = screenToWorld(anchor, viewportRef.current);
+      const elements = elementsRef.current;
+      // Back-to-front, like topmostAt, so two stacked selected widgets resolve the way they look.
+      for (let i = elements.length - 1; i >= 0; i--) {
+        const candidate = elements[i];
+        if (!selected.has(candidate.id) || !hitTestElement(candidate, world, 0)) continue;
+        return el.querySelector(`[data-element-id="${candidate.id}"]`);
+      }
+      return null;
+    };
+
     // Registered natively (not as a React prop) so it can be non-passive: a trackpad pinch arrives
     // as a ctrlKey wheel event, and without preventDefault the WebView zooms the whole app chrome
     // instead of the board. React attaches wheel listeners passively, where preventDefault is a
@@ -235,10 +294,24 @@ export function BoardWorkspace({
         // Exponential rather than linear so each notch changes zoom by a constant *ratio* - the
         // only mapping that feels uniform across the 0.1x..5x range.
         applyZoom(vp.zoom * Math.exp(-e.deltaY / 320), anchor);
-      } else {
-        setViewport({ ...vp, x: vp.x + e.deltaX / vp.zoom, y: vp.y + e.deltaY / vp.zoom });
+        return;
       }
+      // A widget whose content outgrew its frame owns the wheel over its own box: panning the
+      // board out from under a half-read code block is never what the gesture meant, and until
+      // this existed there was no way to reach the rest of that content at all - the board just
+      // slid away underneath it.
+      const scroller = wheelScroller(e.target, () => selectedBoxAt(anchor), e.deltaX, e.deltaY);
+      if (scroller) {
+        // Divided by zoom for the same reason the pan below is: scroll offsets are in the pane's
+        // own untransformed units, so a screen-space delta has to be converted before the content
+        // travels exactly as far as the fingers did.
+        scroller.scrollLeft += e.deltaX / vp.zoom;
+        scroller.scrollTop += e.deltaY / vp.zoom;
+        return;
+      }
+      setViewport({ ...vp, x: vp.x + e.deltaX / vp.zoom, y: vp.y + e.deltaY / vp.zoom });
     };
+
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, [applyZoom, setViewport]);
@@ -260,7 +333,7 @@ export function BoardWorkspace({
       if (!previous || previous.id !== id || now - previous.at > EDIT_BURST_MS) beginHistory();
       lastPatch.current = { id, at: now };
       commitTransient(
-        elementsRef.current.map((el) => (el.id === id ? ({ ...el, ...patch } as BoardElement) : el)),
+        elementsRef.current.map((el) => (el.id === id ? applyPatch(el, patch) : el)),
       );
     },
     [beginHistory, commitTransient],
@@ -557,11 +630,37 @@ export function BoardWorkspace({
 
   // -------------------------------------------------------------- gestures
 
+  /** A selected element's geometry as it stood when a resize began. `flipped` rides along with the
+   * box because a vector shape's direction has to be derived from where the drag *started* - by the
+   * second pointermove the element itself is already carrying the value the first one wrote (see
+   * flipAfterResize). Non-shapes park a harmless `false` there. */
+  type ResizeOrigin = BoardRect & { flipped: boolean };
+
   type Gesture =
     | { kind: "pan"; startScreen: BoardPoint; startViewport: BoardViewport }
     | { kind: "marquee"; startWorld: BoardPoint; additive: boolean; baseSelection: ReadonlySet<string> }
-    | { kind: "move"; startWorld: BoardPoint; origins: Map<string, BoardPoint> }
-    | { kind: "resize"; handle: ResizeHandleId; startWorld: BoardPoint; origins: Map<string, BoardRect> }
+    /** `enterEdit` carries the element a *click* (as opposed to a drag) should open for editing -
+     * the second click of the select-then-edit gesture. It is armed at pointer-down and cleared by
+     * the first pointermove that travels far enough to read as a drag, so pointer-up only has to
+     * ask whether it survived. */
+    | {
+        kind: "move";
+        startWorld: BoardPoint;
+        origins: Map<string, BoardPoint>;
+        enterEdit: string | null;
+      }
+    | { kind: "resize"; handle: ResizeHandleId; startWorld: BoardPoint; origins: Map<string, ResizeOrigin> }
+    /** Dragging one end of a lone line. `anchor` is the end staying put and `moving` where the
+     * dragged end started, both in world space; `end` says which slot the dragged one occupies so
+     * the rebuilt line keeps its points in their original order. */
+    | {
+        kind: "endpoint";
+        id: string;
+        end: "a" | "b";
+        startWorld: BoardPoint;
+        anchor: BoardPoint;
+        moving: BoardPoint;
+      }
     | { kind: "draft-shape"; startWorld: BoardPoint };
 
   const gestureRef = useRef<Gesture | null>(null);
@@ -572,6 +671,10 @@ export function BoardWorkspace({
   function beginResize(handle: ResizeHandleId, e: React.PointerEvent) {
     const container = containerRef.current;
     if (!container) return;
+    // A press on a handle stops propagation, so it never reaches handlePointerDown's own
+    // preventDefault - and a resize drag would otherwise start the native text selection described
+    // there. Harmlessly redundant on the near-miss path, which comes through that handler.
+    e.preventDefault();
     container.setPointerCapture(e.pointerId);
     beginHistory();
     gestureRef.current = {
@@ -581,16 +684,55 @@ export function BoardWorkspace({
       origins: new Map(
         elementsRef.current
           .filter((el) => selectionRef.current.has(el.id))
-          .map((el) => [el.id, { x: el.x, y: el.y, w: el.w, h: el.h }]),
+          .map((el) => [
+            el.id,
+            { x: el.x, y: el.y, w: el.w, h: el.h, flipped: el.kind === "shape" && el.flipped === true },
+          ]),
       ),
     };
+  }
+
+  /** Starts dragging one end of the selected line - a line/arrow shape or a straightened pen
+   * stroke alike (see lineEndpoints). */
+  function beginEndpoint(end: "a" | "b", e: React.PointerEvent) {
+    const container = containerRef.current;
+    if (!container) return;
+    const selected = elementsRef.current.filter((el) => selectionRef.current.has(el.id));
+    const ends = selected.length === 1 ? lineEndpoints(selected[0]) : null;
+    // Only reachable from a handle this same geometry produced, so the selection has already
+    // changed under the press if there's no line here - safer to drop the gesture than to guess.
+    if (!ends) return;
+    e.preventDefault();
+    container.setPointerCapture(e.pointerId);
+    beginHistory();
+    gestureRef.current = {
+      kind: "endpoint",
+      id: selected[0].id,
+      end,
+      startWorld: screenToWorld(screenPointFromEvent(e, container), viewportRef.current),
+      anchor: end === "a" ? ends.b : ends.a,
+      moving: end === "a" ? ends.a : ends.b,
+    };
+  }
+
+  function beginHandleDrag(handle: SelectionHandle, e: React.PointerEvent) {
+    if (handle.kind === "endpoint") beginEndpoint(handle.id, e);
+    else beginResize(handle.id, e);
   }
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
     const container = containerRef.current;
     if (!container) return;
-    // Let a live widget (an element being edited) keep its own clicks - it stops propagation
-    // itself, so anything reaching here is genuinely canvas-directed.
+    // A live widget owns every press that lands inside it - caret placement, drag-selecting code,
+    // scrubbing a waveform, dragging a table's column grip. Checked structurally, once, rather than
+    // by asking each widget to stopPropagation on each of its own parts: the widgets are full of
+    // interactive surfaces (CodeMirror's content, menus, inputs, scrollbars) and the ones that
+    // forgot would silently have their drags stolen by the board's own move gesture. Returning
+    // before `e.preventDefault()` below is the point - that call is what would otherwise stop the
+    // widget from taking focus at all.
+    if (editingId && (e.target as HTMLElement | null)?.closest?.(`[data-element-id="${editingId}"]`)) {
+      return;
+    }
     const screen = screenPointFromEvent(e, container);
     const world = screenToWorld(screen, viewportRef.current);
 
@@ -602,6 +744,17 @@ export function BoardWorkspace({
       return;
     }
     if (e.button !== 0 || drawing) return;
+    // Every branch below starts a board gesture, and none of them wants the WebView's default
+    // response to a press-and-drag: a native text selection, anchored here and extended across the
+    // document as the pointer moves. That selection is invisible over the board's own markup - the
+    // canvas has nothing to highlight - right up until it spans one of the two <canvas> elements,
+    // which are *replaced* elements and so get `::selection` painted across their whole box. With
+    // `--selection` being `rgb(var(--accent-rgb) / 0.22)`, that reads as an accent-coloured wash
+    // over the entire board, appearing and vanishing as the drag crosses the canvas.
+    //
+    // The pan branch above has always called this, which is why panning was the one gesture that
+    // never showed it.
+    e.preventDefault();
     // Past this point every branch either creates or moves something, so a viewer stops here -
     // they keep the pan/hand paths handled above.
     if (!canEdit) return;
@@ -620,6 +773,23 @@ export function BoardWorkspace({
     // Tolerance scales with zoom so "close enough to click" is a constant *on-screen* distance -
     // at 0.2x a 4px world tolerance would be a sub-pixel target.
     const tolerance = 6 / viewportRef.current.zoom;
+
+    // A press that lands near a resize handle is aiming at that handle, whatever is behind it. The
+    // handle's own onPointerDown catches a direct hit; this catches the near miss, which otherwise
+    // falls through to the branches below and - when the pointer is outside the selected element -
+    // starts a marquee that clears the selection the user was reaching for.
+    // Still offered while an element is being edited: a press that landed *inside* the live widget
+    // has already returned above, so anything reaching here is on the chrome around it - and having
+    // to click away from a table before it can be made wider is exactly the kind of detour the
+    // select-then-edit gesture is supposed to remove.
+    if (selectionBounds) {
+      const handle = handleAt(selectionBounds, selectedElements, world, HANDLE_GRAB_PX / viewportRef.current.zoom);
+      if (handle) {
+        beginHandleDrag(handle, e);
+        return;
+      }
+    }
+
     const hit = topmostAt(elementsRef.current, world, tolerance);
     const additive = e.shiftKey || e.metaKey;
 
@@ -636,6 +806,10 @@ export function BoardWorkspace({
       setMarquee({ x: world.x, y: world.y, w: 0, h: 0 });
       return;
     }
+
+    // Captured before the selection is rewritten below, since "was this already selected?" is what
+    // separates the click that selects from the click that opens.
+    const wasSelected = selectionRef.current.has(hit.id);
 
     let nextSelection: ReadonlySet<string>;
     if (additive) {
@@ -662,6 +836,13 @@ export function BoardWorkspace({
       origins: new Map(
         elementsRef.current.filter((el) => nextSelection.has(el.id) && !el.locked).map((el) => [el.id, { x: el.x, y: el.y }]),
       ),
+      // Click an element to select it, click the selected element again to work inside it - the
+      // two-stage gesture every canvas app uses, and the reason a single click can't open a widget
+      // outright: the first press on an element is far more often the start of a drag. Only a lone,
+      // unmodified, non-additive selection qualifies, so shift-extending a selection or moving a
+      // multi-element group never trips it. Double-click still opens an element in one go (see the
+      // canvas's onDoubleClick), which is what makes the shortcut discoverable from either habit.
+      enterEdit: !additive && !hit.locked && wasSelected && nextSelection.size === 1 ? hit.id : null,
     };
   }
 
@@ -696,6 +877,12 @@ export function BoardWorkspace({
       case "move": {
         let dx = world.x - gesture.startWorld.x;
         let dy = world.y - gesture.startWorld.y;
+        // Past this much travel the gesture is a drag, not a click, so it can no longer end by
+        // opening the element. Measured in screen px so the threshold is the same physical slop at
+        // every zoom - at 5x, a world-space tolerance would be five times as twitchy.
+        if (gesture.enterEdit && Math.hypot(dx, dy) * viewportRef.current.zoom > CLICK_SLOP_PX) {
+          gesture.enterEdit = null;
+        }
         if (snapping) {
           // Snap the *anchor element's* resulting corner, then apply the same correction to every
           // element in the selection - so a multi-element drag keeps the group's internal spacing
@@ -727,11 +914,34 @@ export function BoardWorkspace({
           elementsRef.current.map((el) => {
             const origin = gesture.origins.get(el.id);
             if (!origin) return el;
+            const vector = el.kind === "shape" && isVectorShape(el.shape);
+            const raw = resizeFromHandle(origin, gesture.handle, dx, dy);
             // A line or arrow is legitimately flat in one axis, so it gets a 1px floor rather than
             // the general minimum, which would tilt a horizontal line off true.
-            const min = el.kind === "shape" && isVectorShape(el.shape) ? 1 : undefined;
-            return resizeElement(el, clampRect(resizeFromHandle(origin, gesture.handle, dx, dy), min));
+            const next = resizeElement(el, clampRect(raw, vector ? 1 : undefined));
+            // Dragging an endpoint past its anchor mirrors the box, and a vector shape stores its
+            // direction *in* that box - so the diagonal has to be re-read, or the anchored end is
+            // the one that appears to move.
+            return vector
+              ? { ...(next as ShapeElement), flipped: flipAfterResize(origin.flipped, raw) }
+              : next;
           }),
+        );
+        return;
+      }
+      case "endpoint": {
+        const dragged = {
+          x: gesture.moving.x + (world.x - gesture.startWorld.x),
+          y: gesture.moving.y + (world.y - gesture.startWorld.y),
+        };
+        // Snapping lands the end on the lattice itself rather than snapping the *delta*, which is
+        // the same rule the pen's straighten assist follows - so an end dragged onto a vertex meets
+        // whatever else was drawn to that vertex.
+        const target = snapping ? snapToSurface(dragged, surface) : dragged;
+        const a = gesture.end === "a" ? target : gesture.anchor;
+        const b = gesture.end === "a" ? gesture.anchor : target;
+        commitTransient(
+          elementsRef.current.map((el) => (el.id === gesture.id ? setLineEndpoints(el, a, b) : el)),
         );
         return;
       }
@@ -752,6 +962,12 @@ export function BoardWorkspace({
     if (container?.hasPointerCapture(e.pointerId)) container.releasePointerCapture(e.pointerId);
     gestureRef.current = null;
     setMarquee(null);
+
+    // A click that neither moved nor changed the selection: the second click of select-then-edit.
+    if (gesture?.kind === "move" && gesture.enterEdit) {
+      setEditingId(gesture.enterEdit);
+      return;
+    }
 
     if (gesture?.kind === "draft-shape" && draftShape) {
       const vector = isVectorShape(shape);
@@ -903,6 +1119,15 @@ export function BoardWorkspace({
   const cursor =
     effectiveTool === "hand" ? "grab" : effectiveTool === "select" ? "default" : "crosshair";
 
+  /** The clip "Record more" is appending onto, resolved from the id so a voice note deleted (or
+   * replaced) while the recorder is open degrades to a plain new recording rather than patching an
+   * element that is no longer there. */
+  const appendVoiceSrc = useMemo(() => {
+    if (!appendVoiceTo) return undefined;
+    const target = elements.find((el) => el.id === appendVoiceTo);
+    return target?.kind === "voice" ? target.src : undefined;
+  }, [appendVoiceTo, elements]);
+
   const worldStyle = useMemo(
     () => ({
       // translate before scale, and both in one transform: the world layer's own origin is the
@@ -959,6 +1184,11 @@ export function BoardWorkspace({
           if (effectiveTool !== "select" || !canEdit) return;
           const container = containerRef.current;
           if (!container) return;
+          // Double-clicking *inside* a live widget is that widget's own gesture (select a word, a
+          // table cell's text), not a request to open something.
+          if (editingId && (e.target as HTMLElement | null)?.closest?.(`[data-element-id="${editingId}"]`)) {
+            return;
+          }
           const world = screenToWorld(screenPointFromEvent(e, container), viewportRef.current);
           const hit = topmostAt(elementsRef.current, world, 6 / viewportRef.current.zoom);
           if (hit && !hit.locked) {
@@ -984,6 +1214,15 @@ export function BoardWorkspace({
               editing={editingId === el.id}
               onPatch={(patch) => patchElement(el.id, patch)}
               onStartEditing={() => setEditingId(el.id)}
+              onAppendVoice={() => {
+                setAppendVoiceTo(el.id);
+                setVoiceOpen(true);
+              }}
+              onDelete={() => {
+                commit(removeElements(elementsRef.current, new Set([el.id])));
+                setSelection(new Set());
+                setEditingId(null);
+              }}
               assets={assets}
             />
           ))}
@@ -1001,12 +1240,15 @@ export function BoardWorkspace({
             />
           )}
 
-          {selectionBounds && !editingId && canEdit && (
+          {/* Kept up while an element is being edited, unlike a bare text box's caret-only state used
+              to be: a widget's outline is what says which element the toolbar's options apply to, and
+              its handles are how it gets resized without first clicking away. */}
+          {selectionBounds && canEdit && (
             <BoardSelection
               bounds={selectionBounds}
               elements={selectedElements}
               zoom={viewport.zoom}
-              onHandlePointerDown={beginResize}
+              onHandlePointerDown={beginHandleDrag}
             />
           )}
         </div>
@@ -1104,21 +1346,97 @@ export function BoardWorkspace({
         <VoiceCapture
           countdownSeconds={voiceNoteCountdown}
           assets={assets}
+          // Set only for "Record more", which makes the recorder append onto the clip already there
+          // rather than produce a second one (see VoiceCapture, which does the re-encode).
+          appendTo={appendVoiceSrc}
           onCancel={() => {
             setVoiceOpen(false);
             setPendingVoiceAt(null);
+            setAppendVoiceTo(null);
             setTool("select");
           }}
           onComplete={({ src, durationMs, peaks }) => {
-            const at = pendingVoiceAt ?? placementPoint({ x: size.width / 2, y: size.height / 2 });
-            addElement(createVoice(at, src, durationMs, peaks));
+            if (appendVoiceTo) {
+              // A patch, not a new element: the clip keeps its place, its size, its title and its
+              // z-order, which is the whole point of recording *more* rather than recording again.
+              commit(
+                elementsRef.current.map((el) =>
+                  el.id === appendVoiceTo && el.kind === "voice"
+                    ? { ...el, src, durationMs, peaks }
+                    : el,
+                ),
+              );
+            } else {
+              const at = pendingVoiceAt ?? placementPoint({ x: size.width / 2, y: size.height / 2 });
+              addElement(createVoice(at, src, durationMs, peaks));
+            }
             setVoiceOpen(false);
             setPendingVoiceAt(null);
+            setAppendVoiceTo(null);
           }}
         />
       )}
     </div>
   );
+}
+
+/** Every scroll pane a board element can put inside (or beside) its own box: a table's grid, a code
+ * block's CodeMirror scroller, and the language dropdown's list. Nothing else on the board holds
+ * content that can outgrow the frame the user sized, so nothing else has a claim on the wheel. */
+const WIDGET_SCROLLER = ".board-table-scroll, .cm-scroller, .board-widget-menu-list";
+
+/** The pane a wheel should scroll instead of panning the board, or null to let the board have it.
+ *
+ * Two lookups, because how a widget can be found depends on whether it is live. `target` resolves
+ * the pane directly under the cursor and so is the exact answer whenever the pointer can reach the
+ * widget at all - an element open for editing, including the dropdowns it hangs outside its own
+ * box. `boxAt` is the fallback for everything else: a selected-but-not-editing widget is
+ * click-through, so it has to be found by board geometry instead, and the first pane inside it that
+ * can move takes the gesture.
+ *
+ * A pane only claims the wheel when it actually overflows along the axis the gesture is mostly
+ * travelling. A table that fits its frame has nothing to scroll, and swallowing the event there
+ * would strand the user on a board that suddenly refuses to pan. */
+function wheelScroller(
+  target: EventTarget | null,
+  /** Resolved lazily: it costs a walk of the board, and the two cases that dominate - a pan over
+   * open canvas, and a wheel the pointer could already reach a pane for - never need it. */
+  boxAt: () => Element | null,
+  deltaX: number,
+  deltaY: number,
+): HTMLElement | null {
+  const vertical = Math.abs(deltaY) >= Math.abs(deltaX);
+  // Sub-pixel slack: a scroll pane rounds its own metrics, and a fraction of a pixel of "overflow"
+  // is not something the user can see, let alone scroll to.
+  const canScroll = (pane: HTMLElement) =>
+    (vertical ? pane.scrollHeight - pane.clientHeight : pane.scrollWidth - pane.clientWidth) > 1;
+
+  const direct = (target as Element | null)?.closest?.<HTMLElement>(WIDGET_SCROLLER);
+  // A direct hit that can't move is the end of it, not a reason to look further: the pane under the
+  // cursor is the only one the gesture could have meant.
+  if (direct) return canScroll(direct) ? direct : null;
+
+  for (const pane of boxAt()?.querySelectorAll<HTMLElement>(WIDGET_SCROLLER) ?? []) {
+    if (canScroll(pane)) return pane;
+  }
+  return null;
+}
+
+/** Applies a widget's patch to an element, treating an explicitly-`undefined` value as "drop this
+ * field" rather than as "store undefined here".
+ *
+ * Every optional field on a board element is stored by *absence* - no `"dash": "solid"`, no
+ * `"fills": null` (see boardTypes and tableOps' fillsPatch) - both so a board file written before a
+ * feature existed stays indistinguishable from one that simply isn't using it, and so the collab
+ * layer, which puts whole element values into a Y.Map (see collab/boardSync.ts), never has to carry
+ * an `undefined` across the wire. A plain `{ ...el, ...patch }` spread would defeat that: the key
+ * survives the spread with an undefined value and lands in the JSON as `null`. */
+function applyPatch(el: BoardElement, patch: Partial<BoardElement>): BoardElement {
+  const next: Record<string, unknown> = { ...el, ...patch };
+  for (const key of Object.keys(patch)) {
+    if ((patch as Record<string, unknown>)[key] === undefined) delete next[key];
+  }
+  return next as unknown as BoardElement;
 }
 
 /** An ink stroke at a new width.

@@ -23,6 +23,7 @@ import {
   segmentRegionInterval,
   type EraserRegion,
 } from "./geometry";
+import { columnAlign } from "./tableOps";
 
 /** Element factories and pure transforms over a board's element list. Kept out of the React
  * components so every mutation is a plain, testable value->value function and the view layer only
@@ -37,9 +38,11 @@ function id(): string {
 export const DEFAULT_SIZES: Record<string, { w: number; h: number }> = {
   text: { w: 240, h: 72 },
   shape: { w: 160, h: 120 },
-  code: { w: 380, h: 220 },
-  table: { w: 360, h: 132 },
-  voice: { w: 300, h: 88 },
+  code: { w: 420, h: 240 },
+  table: { w: 380, h: 148 },
+  // Two rows of chrome - title/speed/menu over the transport - so it is deeper than the single
+  // strip it used to be, and wide enough that the waveform still reads between the buttons.
+  voice: { w: 340, h: 104 },
   image: { w: 280, h: 200 },
 };
 
@@ -218,6 +221,57 @@ export function resizeElement(el: BoardElement, rect: BoardRect): BoardElement {
   return next;
 }
 
+/** Re-lays a line onto the endpoints `a` and `b`, re-deriving the box from them. Both storage forms
+ * are handled (see lineEndpoints); anything that isn't a line comes back untouched.
+ *
+ * Endpoint dragging deliberately doesn't go through resizeElement's box scaling, even though a
+ * line's two ends *are* two corners of its box. A line's box is derived from its ends, not the
+ * other way round, and going via the box loses in both directions:
+ *
+ *   - A flat horizontal line has no height for a scale factor to act on, so its ends would stay
+ *     pinned to one edge however far up or down the pointer went. resizeElement's own zero-guard
+ *     turns that into a no-op rather than a divide by zero, which is right for a box drag and
+ *     useless for an endpoint one.
+ *   - An ink box is padded by half the stroke width, so scaling it scales the padding too and the
+ *     end creeps away from the pointer that is supposedly holding it.
+ *
+ * Ending exactly where the other end already is would leave a zero-length line - invisible, and
+ * hard to find again - so that one degenerate case is refused outright. */
+export function setLineEndpoints(el: BoardElement, a: BoardPoint, b: BoardPoint): BoardElement {
+  if (a.x === b.x && a.y === b.y) return el;
+  if (el.kind === "shape" && isVectorShape(el.shape)) {
+    return {
+      ...el,
+      x: Math.min(a.x, b.x),
+      y: Math.min(a.y, b.y),
+      w: Math.abs(b.x - a.x),
+      h: Math.abs(b.y - a.y),
+      // Which diagonal of the box the line now runs along - the same test the draft gesture uses
+      // (see ShapeElement.flipped).
+      flipped: (b.x - a.x) * (b.y - a.y) < 0,
+    };
+  }
+  if (el.kind === "ink" && el.points.length === 2) {
+    // Same padded box inkFromPoints builds, so a re-laid stroke is indistinguishable from a
+    // freshly drawn one - including how much room the round line cap needs at each end.
+    const pad = el.width / 2;
+    const x = Math.min(a.x, b.x) - pad;
+    const y = Math.min(a.y, b.y) - pad;
+    return {
+      ...el,
+      x,
+      y,
+      w: Math.abs(b.x - a.x) + el.width,
+      h: Math.abs(b.y - a.y) + el.width,
+      points: [
+        { x: a.x - x, y: a.y - y },
+        { x: b.x - x, y: b.y - y },
+      ],
+    };
+  }
+  return el;
+}
+
 /** Minimum box an element may be resized to - small enough to be useful, large enough that an
  * element can never be shrunk into an unclickable speck. */
 export const MIN_ELEMENT_SIZE = 12;
@@ -388,11 +442,33 @@ export function boardDigest(elements: readonly BoardElement[]): string {
     if (el.kind === "code") {
       lines.push("```" + el.language, text, "```");
     } else if (el.kind === "table") {
-      lines.push(...text.split("\n").map((row) => `| ${row} |`));
+      // A real Markdown table, delimiter row and all - so the digest renders as a table anywhere
+      // the `.md` is opened, not as a column of pipes. The delimiter carries the board table's own
+      // per-column alignment, which is the reason alignment is stored per column rather than per
+      // cell (see TableElement.align).
+      const rows = text.split("\n").map((row) => `| ${row} |`);
+      const cols = el.rows[0]?.length ?? 0;
+      if (cols > 0) {
+        const delimiter = Array.from({ length: cols }, (_, c) => alignmentMarker(columnAlign(el, c)));
+        rows.splice(1, 0, `| ${delimiter.join(" | ")} |`);
+      }
+      lines.push(...rows);
     } else {
       lines.push(text);
     }
     lines.push("");
   }
   return lines.join("\n").trimEnd() + (lines.length ? "\n" : "");
+}
+
+/** One column's cell in a Markdown table's delimiter row. */
+function alignmentMarker(align: BoardTextAlign): string {
+  switch (align) {
+    case "center":
+      return ":---:";
+    case "right":
+      return "---:";
+    default:
+      return "---";
+  }
 }

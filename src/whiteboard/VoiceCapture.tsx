@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Pause, Play, Square, X } from "lucide-react";
-import { VoiceRecording, computePeaks, decodeWav, formatDuration } from "../milkdown/voiceRecording";
-import { putAsset, type BoardAssets } from "./useAssetUrl";
+import { VoiceRecording, appendWav, computePeaks, decodeWav, formatDuration } from "../milkdown/voiceRecording";
+import { getAssetBytes, putAsset, type BoardAssets } from "./useAssetUrl";
 
 /** Records a voice note for placement on a board.
  *
@@ -16,12 +16,18 @@ import { putAsset, type BoardAssets } from "./useAssetUrl";
 export function VoiceCapture({
   countdownSeconds,
   assets,
+  appendTo,
   onCancel,
   onComplete,
 }: {
   countdownSeconds: number;
   /** Where the finished WAV is stored - the owner's disk or a guest's IndexedDB. See BoardAssets. */
   assets: BoardAssets;
+  /** AssetStore key of a clip this recording is being added *onto* ("Record more" on an existing
+   * voice note), or undefined to record a standalone one. The result is always one continuous clip
+   * rather than a playlist - see appendWav - which is why appending produces a whole new asset key
+   * rather than a second reference. */
+  appendTo?: string;
   onCancel: () => void;
   onComplete: (result: { src: string; durationMs: number; peaks: number[] }) => void;
 }) {
@@ -86,8 +92,17 @@ export function VoiceCapture({
     }
     setPhase("saving");
     try {
-      const { wav, durationMs } = await recording.stop();
+      const recorded = await recording.stop();
       recordingRef.current = null;
+      // Appending re-encodes both clips into one, so everything downstream - the asset key, the
+      // duration, the waveform - is derived from the *combined* audio and the element ends up
+      // pointing at a single continuous recording. A missing original (a guest whose peer never
+      // sent those bytes) falls back to keeping just what was recorded now, which is strictly
+      // better than failing the save and discarding it.
+      const existing = appendTo ? await getAssetBytes(assets, appendTo) : null;
+      const { wav, durationMs } = existing
+        ? await appendWav(existing, recorded.wav)
+        : recorded;
       const key = await putAsset(assets, wav);
       // 96 buckets is roughly one bar per 3px across a default-width voice element - dense enough
       // to read as a waveform, cheap enough to store inline in the board document.
@@ -116,7 +131,7 @@ export function VoiceCapture({
       >
         <div className="flex items-center gap-2">
           <Mic size={15} className="text-accent" />
-          <span className="text-primary text-sm font-medium">Voice note</span>
+          <span className="text-primary text-sm font-medium">{appendTo ? "Record more" : "Voice note"}</span>
           <button type="button" className="btn-ghost ml-auto h-6 w-6" onClick={cancel} aria-label="Cancel">
             <X size={13} />
           </button>
@@ -157,7 +172,7 @@ export function VoiceCapture({
             onClick={() => void stopAndSave()}
           >
             <Square size={12} />
-            {phase === "saving" ? "Saving…" : "Stop & place"}
+            {phase === "saving" ? "Saving…" : appendTo ? "Stop & append" : "Stop & place"}
           </button>
         </div>
       </div>
