@@ -28,8 +28,35 @@ export function colorForPubKey(pubKeyHex: string): string {
   return PRESENCE_COLORS[hash % PRESENCE_COLORS.length];
 }
 
+/** Snapshot encodings a guest can advertise in its "hello", and the host can name back in its
+ * "welcome". Hex is deliberately *not* a member: it is what both sides fall back to when neither
+ * field is present, which is exactly what a build older than this negotiation sends and expects.
+ * See SNAPSHOT_ENCODINGS below. */
+export type SnapshotEncoding = "base64";
+
+/** What this build can decode, advertised by the guest and honoured by the host.
+ *
+ * The negotiation exists because the two sides of a session ship on completely different cadences:
+ * the desktop app is a versioned release a user may be several versions behind on, while the
+ * browser-guest page is whatever is currently deployed. So all four version pairings have to work,
+ * and they do - an old guest sends no `snapshotEncodings` and a new host answers in hex; a new
+ * guest advertises base64 but an old host ignores the field, sends no `snapshotEncoding` back, and
+ * the guest reads its answer as hex. Only new-to-new picks base64, where both ends are known to
+ * understand it. */
+export const SNAPSHOT_ENCODINGS: readonly SnapshotEncoding[] = ["base64"];
+
 export type SessionCtrlMessage =
-  | { type: "hello"; pubKey: string; timestamp: number; signature: string }
+  | {
+      type: "hello";
+      pubKey: string;
+      timestamp: number;
+      signature: string;
+      // Absent from any build predating the negotiation - see SNAPSHOT_ENCODINGS. Deliberately
+      // outside the signed material: it selects a transfer encoding for a payload the guest
+      // verifies by signature regardless, so tampering with it can only produce a snapshot this
+      // guest fails to decode, never one it wrongly accepts.
+      snapshotEncodings?: string[];
+    }
   // `title` is the owner's real, filename-derived title - safe to send here (unlike the invite
   // payload, see invite.ts's "leaks nothing before vetting" comment) because by this point the
   // recipient is already an approved, ACL-verified collaborator, not an unvetted invite holder.
@@ -54,14 +81,22 @@ export type SessionCtrlMessage =
       // structure, and merging them duplicates every node onto the page (see yjsBridge.ts's
       // handling of this field for the full story of the bug this fixes).
       generation: string;
-      // The owner's full current document state (Y.encodeStateAsUpdateV2), hex-encoded so it
+      // The owner's full current document state (Y.encodeStateAsUpdateV2), text-encoded so it
       // fits this JSON-shaped message (Trystero's makeAction<T> requires T to be a plain
       // JsonValue when it isn't itself a raw binary payload - a Uint8Array nested inside an
       // object field doesn't qualify, same constraint noted on `features` below). Sent inline
       // with "welcome" itself rather than as a separate `update` message beforehand: `ctrl` and
       // `update` are different named actions, with no guarantee they arrive in the order they
       // were sent, so a separate pre-welcome update risked losing that race.
+      //
+      // This is the largest single thing the protocol ever sends - a whiteboard's snapshot carries
+      // every stroke's full point list - so which encoding it uses is worth negotiating rather
+      // than fixing at hex's flat 2x. See `snapshotEncoding` below.
       snapshot: string;
+      // How `snapshot` above is encoded. Absent means hex, which is both what every build
+      // predating this negotiation sends and what the host answers a guest that didn't advertise
+      // anything else - see SNAPSHOT_ENCODINGS.
+      snapshotEncoding?: SnapshotEncoding;
       signature: string;
       title: string;
       features: Record<string, boolean>;

@@ -25,6 +25,7 @@ export function SharedBoardView({
   shared,
   canEdit,
   assetStore,
+  prepareImage,
   voiceEnabled,
   codeEnabled,
 }: {
@@ -34,6 +35,9 @@ export function SharedBoardView({
   shared: WhiteboardKindShared;
   canEdit: boolean;
   assetStore: AssetStore;
+  /** See BoardAssets.prepareImage - injected alongside `assetStore` for the same reason, and by
+   * the same two call sites. */
+  prepareImage?: (file: File) => Promise<Uint8Array>;
   /** The *owner's* feature flags as of connect time (see JoinedSession.features) - a guest
    * shouldn't be offered a widget the owner has turned off on their own device. */
   voiceEnabled: boolean;
@@ -45,8 +49,8 @@ export function SharedBoardView({
   const assets: BoardAssets = useMemo(
     // A guest legitimately starts with none of the owner's images, so the peer fetch isn't an
     // error path here - it's how assets normally arrive the first time.
-    () => ({ store: assetStore, fetchRemote: session.resolveAsset }),
-    [assetStore, session],
+    () => ({ store: assetStore, fetchRemote: session.resolveAsset, prepareImage }),
+    [assetStore, session, prepareImage],
   );
 
   return (

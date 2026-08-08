@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import { BrowserEditor } from "./BrowserEditor";
+import { fileToUploadableImage } from "./browserImageUpload";
 import { idbAssetStore } from "./idbAssetStore";
 import { SharedBoardView } from "../whiteboard/SharedBoardView";
 import type { JoinedSession } from "../collab/yjsBridge";
@@ -28,7 +29,9 @@ function GuestTextView({ session, canEdit, noteId }: GuestKindViewProps) {
 
 /** Same narrowing in the other direction, for boards. A browser guest has no filesystem, so the
  * board's images and voice notes are backed by IndexedDB, with the session as the fallback for
- * anything this device hasn't received yet - see BoardAssets. */
+ * anything this device hasn't received yet - see BoardAssets. Images added *here* go through the
+ * same downscale the guest's note editor already applies, for the same reason: with no vault
+ * behind them, every byte is one the owner has to pull across the wire. */
 function GuestBoardView({ session, canEdit }: GuestKindViewProps) {
   if (session.shared.kind !== "whiteboard") return <UnexpectedKind />;
   return (
@@ -37,10 +40,20 @@ function GuestBoardView({ session, canEdit }: GuestKindViewProps) {
       shared={session.shared}
       canEdit={canEdit}
       assetStore={idbAssetStore}
+      prepareImage={boardImageBytes}
       voiceEnabled={session.features.voiceNotes}
       codeEnabled={session.features.codeBlock}
     />
   );
+}
+
+/** BoardAssets.prepareImage for a browser guest - the bytes half of fileToUploadableImage. A board
+ * image is addressed purely by content hash (ImageElement.src), with no `mime` attribute to carry
+ * alongside it the way a note's image node has, so the mime the recompress may have changed is
+ * simply dropped; both <img> and the asset store sniff the actual bytes (see useAssetUrl's
+ * mimeFor). */
+async function boardImageBytes(file: File): Promise<Uint8Array> {
+  return (await fileToUploadableImage(file)).bytes;
 }
 
 function UnexpectedKind() {

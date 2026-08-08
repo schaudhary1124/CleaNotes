@@ -611,7 +611,12 @@ export function BoardWorkspace({
     const at = pendingImageAt.current ?? placementPoint({ x: size.width / 2, y: size.height / 2 });
     pendingImageAt.current = null;
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      // Shrunk first on a device that asked for that (see BoardAssets.prepareImage) - which is
+      // also why the hash below is taken from these bytes rather than the file's: what gets stored
+      // is what gets addressed.
+      const bytes = assets.prepareImage
+        ? await assets.prepareImage(file)
+        : new Uint8Array(await file.arrayBuffer());
       // Content-addressed, exactly like Editor.tsx's insertImageFile - the same picture dropped on
       // a board and pasted into a note dedupes onto one file on disk (or one IndexedDB entry, for
       // a browser guest - see BoardAssets).

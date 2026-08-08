@@ -2,12 +2,12 @@ import * as Y from "yjs";
 import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import { canEdit, getAcl, touchLastSeen } from "./acl";
 import { createAssetChannel } from "./assetSync";
-import { fromHex, toHex } from "./hex";
+import { fromHex, toBase64, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
 import { attachSharedTypesForKind, type KindSharedTypes } from "./kindSharedTypes";
 import { seedSharedTypesFromDisk, wireSharedTypePersistence } from "./kindPersistence";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
-import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText } from "./sessionProtocol";
+import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText, SNAPSHOT_ENCODINGS } from "./sessionProtocol";
 import type { CollabAcl, FeatureFlags, NoteKind } from "../types";
 import { fsAssetStore, getNoteKind, titleFromNotePath } from "../utils/fsNotes";
 
@@ -181,11 +181,17 @@ export async function hostSession(notePath: string, identity: DeviceIdentity, fe
       lastKnownCanEdit: canEdit(latest, message.pubKey),
     });
     const welcomeSignature = toHex(sign(identity, signedText("welcome", acl.noteId, message.pubKey)));
+    // Answer in the most compact encoding this guest said it understands, falling back to hex for
+    // one that advertised nothing - see SNAPSHOT_ENCODINGS for why that fallback is the whole point
+    // rather than a defensive nicety.
+    const snapshotBytes = Y.encodeStateAsUpdateV2(ydoc);
+    const snapshotEncoding = SNAPSHOT_ENCODINGS.find((enc) => message.snapshotEncodings?.includes(enc));
     await ctrl.send(
       {
         type: "welcome",
         generation,
-        snapshot: toHex(Y.encodeStateAsUpdateV2(ydoc)),
+        snapshot: snapshotEncoding === "base64" ? toBase64(snapshotBytes) : toHex(snapshotBytes),
+        ...(snapshotEncoding ? { snapshotEncoding } : {}),
         signature: welcomeSignature,
         title: titleFromNotePath(notePath),
         // Cast, not a lie: FeatureFlags' actual runtime shape (string keys, boolean values) is a

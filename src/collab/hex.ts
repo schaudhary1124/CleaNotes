@@ -1,5 +1,12 @@
-/** Shared hex encoding for the collaboration feature - public keys, signatures, and invite
- * secrets are all passed around as hex strings (JSON-safe, easy to eyeball/debug/paste). */
+/** Shared binary <-> JSON-safe string encodings for the collaboration feature.
+ *
+ * Hex is the default and what everything identity-shaped uses - public keys, signatures, and
+ * invite secrets are all passed around as hex strings, which are easy to eyeball, debug and paste,
+ * and short enough that hex's 2x expansion costs nothing.
+ *
+ * Base64 exists for the one payload where that 2x actually matters: a session's opening document
+ * snapshot (see sessionProtocol.ts's "welcome"), which for a whiteboard is by far the largest thing
+ * the protocol ever sends and is never read by a human. */
 
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -11,6 +18,30 @@ export function fromHex(hex: string): Uint8Array {
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+
+/** Chunk size for the binary-string step below. `String.fromCharCode(...chunk)` spreads one
+ * argument per byte, and a multi-megabyte snapshot passed whole would blow the engine's argument
+ * limit outright - so the string is built in pieces well under it. */
+const BASE64_CHUNK_BYTES = 0x8000;
+
+/** ~1.33 bytes of string per byte of input, against hex's 2 - see this module's header for where
+ * that difference is worth having. */
+export function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += BASE64_CHUNK_BYTES) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_BYTES));
+  }
+  return btoa(binary);
+}
+
+/** Throws on malformed input (via `atob`), the same way fromHex does - callers treat that as "this
+ * message is corrupt" rather than trying to salvage it. */
+export function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 

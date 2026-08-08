@@ -55,6 +55,22 @@ export interface WhiteboardKindShared {
 
 export type KindSharedTypes = TextKindShared | WhiteboardKindShared;
 
+/** Every kind attachSharedTypesForKind can actually return shared types for. Kept adjacent to that
+ * switch so adding a kind to one without the other is an obvious omission rather than a runtime
+ * surprise. */
+const COLLABORATIVE_KINDS: ReadonlySet<string> = new Set<NoteKind>(["default", "fixed-size", "whiteboard"]);
+
+/** Whether `kind` - a bare string off the wire, from a device that may be running a different app
+ * version than this one - names a kind this build can attach shared types for.
+ *
+ * Callers must check this *before* attachSharedTypesForKind rather than catching its throw: an
+ * unrecognized kind isn't a case that switch has at all, so it returns undefined rather than
+ * throwing, and the failure then surfaces somewhere much further downstream. See yjsBridge.ts's
+ * welcome handler, which is the one place a kind is ever taken from an untrusted source. */
+export function isCollaborativeKind(kind: string): kind is NoteKind {
+  return COLLABORATIVE_KINDS.has(kind);
+}
+
 /** Attaches (or re-resolves, if already attached - Yjs shared-type lookups are idempotent by
  * name) the Yjs shared type(s) a note's kind needs onto `ydoc`. Must be called - on both the
  * host and guest side - before anything reads/writes through the returned shared types, but

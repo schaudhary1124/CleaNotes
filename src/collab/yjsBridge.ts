@@ -3,11 +3,11 @@ import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate } from "y-protoc
 import type { Room } from "trystero/nostr";
 import type { AssetStore } from "./assetStore";
 import { createAssetChannel } from "./assetSync";
-import { fromHex, toHex } from "./hex";
+import { fromBase64, fromHex, toHex } from "./hex";
 import { type DeviceIdentity, sign, verifySignature } from "./identity";
-import { attachSharedTypesForKind, type KindSharedTypes } from "./kindSharedTypes";
+import { attachSharedTypesForKind, isCollaborativeKind, type KindSharedTypes } from "./kindSharedTypes";
 import { deriveSessionRoom, joinTrysteroRoom } from "./signaling";
-import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText } from "./sessionProtocol";
+import { AWARENESS_BROADCAST_THROTTLE_MS, colorForPubKey, CONTENT_BATCH_WINDOW_MS, type SessionCtrlMessage, signedText, SNAPSHOT_ENCODINGS } from "./sessionProtocol";
 import type { CollabRole, FeatureFlags, NoteKind } from "../types";
 import { DEFAULT_FEATURES } from "../utils/settings";
 
@@ -278,9 +278,30 @@ export function joinSession(
             // itself), nothing to rebuild.
             if (settled && message.generation === currentGeneration) return;
 
+            // `kind` is a bare string from a device that may be running a different app version
+            // than this one, so it can name a kind this build has no collaborative implementation
+            // for - or one it has never heard of at all. Both used to surface as an exception
+            // thrown inside this handler, which meant the join promise simply never settled: the
+            // only visible symptom was the 20s timeout below firing, indistinguishable from "the
+            // owner is offline", which in the browser guest loops straight back to the PIN screen
+            // forever. Checked up front instead - before decoding a snapshot that could be several
+            // megabytes - so the guest is told what actually happened and stops retrying something
+            // that cannot succeed.
+            if (!isCollaborativeKind(message.kind)) {
+              fail(
+                new Error(
+                  `This note is a "${message.kind}" note, which this version can't open here yet - open it in the CleaNotes desktop app instead.`,
+                ),
+              );
+              return;
+            }
+
             let snapshot: Uint8Array;
             try {
-              snapshot = fromHex(message.snapshot);
+              // Hex whenever the host named no encoding - either it predates the negotiation, or
+              // it saw a `hello` (ours, from an older build) that advertised nothing. See
+              // sessionProtocol.ts's SNAPSHOT_ENCODINGS.
+              snapshot = message.snapshotEncoding === "base64" ? fromBase64(message.snapshot) : fromHex(message.snapshot);
             } catch {
               return; // malformed - keep whatever we already have rather than corrupt it
             }
@@ -293,13 +314,13 @@ export function joinSession(
               teardownLocalDoc();
               ydoc = new Y.Doc();
               awareness = new Awareness(ydoc);
-              shared = attachSharedTypesForKind(ydoc, message.kind as NoteKind);
+              shared = attachSharedTypesForKind(ydoc, message.kind);
               wireLocalDoc();
             } else {
               // First connect: `ydoc`/`awareness` were already created eagerly (see their
               // declaration above), but the specific shared type(s) to resolve off `ydoc`
               // weren't knowable until now - see `shared`'s own declaration comment.
-              shared = attachSharedTypesForKind(ydoc, message.kind as NoteKind);
+              shared = attachSharedTypesForKind(ydoc, message.kind);
             }
             Y.applyUpdateV2(ydoc, snapshot, "remote");
             currentGeneration = message.generation;
@@ -340,7 +361,15 @@ export function joinSession(
           ownerPeerId = peerId;
           const timestamp = Date.now();
           const signature = toHex(sign(identity, signedText("session", noteId, String(timestamp))));
-          await ctrl.send({ type: "hello", pubKey: identity.publicKeyHex, timestamp, signature });
+          await ctrl.send({
+            type: "hello",
+            pubKey: identity.publicKeyHex,
+            timestamp,
+            signature,
+            // Lets the owner send the opening snapshot in something more compact than hex, when
+            // they're new enough to know how - see sessionProtocol.ts's SNAPSHOT_ENCODINGS.
+            snapshotEncodings: [...SNAPSHOT_ENCODINGS],
+          });
           // Deferred until there's actually a peer connected to broadcast to (see the
           // declaration comment above) - the owner is the only peer a guest ever has in this
           // star topology, so onPeerJoin firing at all means it's now safe to announce presence.

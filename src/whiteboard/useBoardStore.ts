@@ -41,6 +41,29 @@ import { emptyBoard, type BoardDoc, type BoardElement, type BoardSurface, type B
 const HISTORY_LIMIT = 100;
 const SAVE_DEBOUNCE_MS = 400;
 
+/** How often the in-progress state of a continuous gesture is pushed into the shared types.
+ *
+ * A drag, resize, endpoint drag or eraser sweep fires on every pointer sample - 120Hz on a
+ * trackpad - and each one previously wrote straight through. That matters far more here than it
+ * would for text, because a Y.Map keyed by element id has whole elements as its write granularity
+ * (see kindSharedTypes.ts): moving one ink stroke by two pixels re-serializes its entire point
+ * list, moving a table re-serializes every cell. A single two-second drag of a long stroke is
+ * megabytes on the wire that way, and a multi-element selection can produce an update past
+ * hostSession's MAX_UPDATE_BYTES cap - which the owner drops outright and silently, so a guest's
+ * move simply never lands.
+ *
+ * So the two halves are decoupled: local React state still updates on every sample, so the person
+ * dragging sees their own gesture at full frame rate, while the CRDT write is coalesced to this
+ * interval - leading edge, so the first sample of a gesture goes out with no added latency, then
+ * the most recent state per tick and once more on the trailing edge. Peers see ~15 updates/sec,
+ * comfortably past what reads as smooth, for a fraction of the bytes.
+ *
+ * Deliberately a shade above sessionProtocol's CONTENT_BATCH_WINDOW_MS: writing faster than that
+ * window buys nothing, since the transport merges those updates into one message anyway - but a
+ * merged update still *carries* every intermediate full-element copy, which is why the coalescing
+ * has to happen here, before the write, rather than on the wire. */
+const TRANSIENT_WRITE_INTERVAL_MS = 65;
+
 /** Reading and writing a board's `.whiteboard.json` sidecar.
  *
  * Injected rather than calling fsNotes.ts directly, for the same reason BoardAssets is: this
@@ -65,7 +88,11 @@ export interface BoardStore {
   commit: (next: BoardElement[]) => void;
   /** Replaces the element list *without* touching history - for the continuous phase of a drag,
    * where every pointer move would otherwise push its own undo step. Callers pair this with a
-   * single `beginHistory()` at gesture start. */
+   * single `beginHistory()` at gesture start.
+   *
+   * In a session this is also the path whose write-through to collaborators is coalesced rather
+   * than sent per sample - see TRANSIENT_WRITE_INTERVAL_MS. Local state still updates on every
+   * call, so callers need do nothing differently; it is only what reaches the wire that thins out. */
   commitTransient: (next: BoardElement[]) => void;
   /** Snapshots the current elements onto the undo stack ahead of a multi-step gesture. */
   beginHistory: () => void;
@@ -104,6 +131,59 @@ export function useBoardStore(
   // Null during a session: the host's own persistence becomes the single writer then, even on the
   // owner's device (see collab/kindPersistence.ts).
   const file = source.mode === "local" ? source.file : null;
+
+  // ---- collab mode: coalesced write-through -------------------------------
+  // See TRANSIENT_WRITE_INTERVAL_MS. The element list a throttle tick still owes the shared types,
+  // and the tick that will write it - both null whenever nothing is queued.
+  const pendingWriteRef = useRef<BoardElement[] | null>(null);
+  const writeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const writeShared = useCallback(
+    (next: readonly BoardElement[]) => {
+      if (!shared) return;
+      mirroredRef.current = writeBoardElements(shared, next, mirroredRef.current);
+    },
+    [shared],
+  );
+
+  /** Writes whatever a tick is still holding and stops the throttle - so a gesture's final state
+   * can't be left sitting in `pendingWriteRef` when something needs the shared types to be current
+   * right now (a discrete edit, a remote change, unmount). */
+  const flushSharedWrite = useCallback(() => {
+    if (writeTimerRef.current) {
+      clearTimeout(writeTimerRef.current);
+      writeTimerRef.current = null;
+    }
+    const pending = pendingWriteRef.current;
+    pendingWriteRef.current = null;
+    if (pending) writeShared(pending);
+  }, [writeShared]);
+
+  const scheduleSharedWrite = useCallback(
+    (next: BoardElement[]) => {
+      if (!shared) return;
+      // Mid-window: hold the newest state and let the pending tick carry it. Only the latest is
+      // kept - every intermediate frame of a drag is superseded by the one after it, so queueing
+      // them would put states nobody ever needs to see on the wire.
+      if (writeTimerRef.current) {
+        pendingWriteRef.current = next;
+        return;
+      }
+      writeShared(next); // leading edge
+      const tick = () => {
+        writeTimerRef.current = null;
+        const pending = pendingWriteRef.current;
+        pendingWriteRef.current = null;
+        if (!pending) return; // gesture went idle - let the throttle lapse
+        writeShared(pending);
+        // Re-armed rather than rescheduled by the next sample, so a gesture still in flight keeps
+        // ticking at a fixed rate instead of its cadence tracking the pointer's sample rate.
+        writeTimerRef.current = setTimeout(tick, TRANSIENT_WRITE_INTERVAL_MS);
+      };
+      writeTimerRef.current = setTimeout(tick, TRANSIENT_WRITE_INTERVAL_MS);
+    },
+    [shared, writeShared],
+  );
 
   // ---- local mode: load from the sidecar ----------------------------------
   useEffect(() => {
@@ -164,6 +244,14 @@ export function useBoardStore(
       // also replace the element objects mid-drag with equal-but-different ones, defeating the
       // reference diffing that keeps a drag cheap.
       if (transaction.origin === BOARD_LOCAL_ORIGIN) return;
+      // sync() re-reads the shared types wholesale, and whatever a gesture in progress hasn't
+      // written yet isn't in them (see TRANSIENT_WRITE_INTERVAL_MS) - so land it first, or a
+      // collaborator's edit arriving mid-drag would snap the element being dragged back to its
+      // last written position until the next tick. Writing from inside an observer is a supported
+      // Yjs pattern: it queues a separate transaction rather than nesting one (see yjs's own
+      // comment in `transact`), and that transaction carries BOARD_LOCAL_ORIGIN, so it comes back
+      // through here and is skipped by the guard above.
+      flushSharedWrite();
       sync();
     };
     shared.yElements.observe(observer);
@@ -173,8 +261,12 @@ export function useBoardStore(
       shared.yElements.unobserve(observer);
       shared.yOrder.unobserve(observer);
       shared.yMeta.unobserve(observer);
+      // Last-chance write for collab mode, mirroring the local-mode sidecar flush below: closing
+      // the note within a throttle window of the final pointer sample would otherwise drop that
+      // last sliver of the gesture for everyone else.
+      flushSharedWrite();
     };
-  }, [shared]);
+  }, [shared, flushSharedWrite]);
 
   const persist = useDebouncedCallback((next: BoardDoc) => {
     void file?.write(next); // null during a session - the host owns the file then, see the header
@@ -199,13 +291,40 @@ export function useBoardStore(
     setCanRedo(false);
   }, []);
 
-  const setElements = useCallback(
+  /** React state and the digest callback - the half of a change that always happens per call,
+   * whatever the shared types are doing. */
+  const setLocal = useCallback(
     (next: BoardElement[]) => {
-      if (shared) mirroredRef.current = writeBoardElements(shared, next, mirroredRef.current);
       apply({ ...docRef.current, elements: next });
       changedRef.current?.(next);
     },
-    [apply, shared],
+    [apply],
+  );
+
+  /** A discrete edit - add, delete, restyle, undo, paste. Lands in the shared types immediately;
+   * a throttled write still queued behind it is dropped rather than flushed, because `next` is the
+   * whole document and writeBoardElements reconciles against it wholesale, so writing the stale
+   * intermediate first would only produce a state this same call immediately overwrites. */
+  const setElements = useCallback(
+    (next: BoardElement[]) => {
+      if (writeTimerRef.current) {
+        clearTimeout(writeTimerRef.current);
+        writeTimerRef.current = null;
+      }
+      pendingWriteRef.current = null;
+      writeShared(next);
+      setLocal(next);
+    },
+    [setLocal, writeShared],
+  );
+
+  /** The continuous phase of a gesture - see TRANSIENT_WRITE_INTERVAL_MS. */
+  const setElementsTransient = useCallback(
+    (next: BoardElement[]) => {
+      scheduleSharedWrite(next);
+      setLocal(next);
+    },
+    [scheduleSharedWrite, setLocal],
   );
 
   const commit = useCallback(
@@ -265,7 +384,7 @@ export function useBoardStore(
     doc,
     loading,
     commit,
-    commitTransient: setElements,
+    commitTransient: setElementsTransient,
     beginHistory: pushHistory,
     setSurface,
     setViewport,

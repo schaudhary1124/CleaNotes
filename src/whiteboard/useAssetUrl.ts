@@ -15,6 +15,17 @@ export interface BoardAssets {
    * `resolveAsset` (see hostSession.ts/yjsBridge.ts). Absent for a solo board, where a local miss
    * is simply a missing asset. */
   fetchRemote?: (key: string) => Promise<Uint8Array>;
+  /** Turns a picked/pasted image file into the bytes to actually store, for a device that should
+   * shrink it first. Absent means store the file as-is.
+   *
+   * Injected for the same reason `store` is, and split the same way: a device with a vault keeps
+   * the user's original at full fidelity, because the bytes never have to go anywhere. A browser
+   * guest has no vault - every image it adds exists only as something the owner will pull across
+   * the wire - so an unresized phone photo would be several megabytes of transfer for a picture
+   * the board renders a few hundred pixels wide. That is the same split Editor.tsx (raw) and
+   * browser-guest/browserImageUpload.ts (downscaled) already make for note images; this is what
+   * lets a board follow it too. */
+  prepareImage?: (file: File) => Promise<Uint8Array>;
 }
 
 /** Stores bytes and returns the AssetStore key to reference them by. Content-addressed, so the
